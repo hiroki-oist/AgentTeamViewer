@@ -24,7 +24,7 @@ const SCHEMAS = {
       type: 'array',
       items: obj({
         id: str, title: str, dependsOn: strs, risk,
-        tasks: { type: 'array', items: obj({ id: str, title: str, description: str, kind: str, writeSet: strs, risk }) },
+        tasks: { type: 'array', items: obj({ id: str, title: str, description: str, kind: str, writeSet: strs, needs: strs, risk }) },
       }),
     },
     newKinds: {
@@ -33,6 +33,8 @@ const SCHEMAS = {
     },
     humanRequests: { type: 'array', items: humanRequest },
   }),
+  // 既存の計画に task 単位の依存を補う（--resume で古い計画を読んだとき）
+  needs: obj({ tasks: { type: 'array', items: obj({ id: str, needs: strs, reason: str }) } }),
   work: obj({
     status: { type: 'string', enum: ['done', 'blocked', 'gave_up'] },
     summary: str,
@@ -71,6 +73,7 @@ Rules:
 - epics = mid-sized units of work, each ending with a review. tasks = one worker agent each, small enough to finish in one session.
 - Keep the graph small: at most ${maxTasks} tasks total. Fewer, well-scoped tasks waste fewer tokens than many tiny ones.
 - ids: epics "E1", "E2", …; tasks "<epicId>-T1", "<epicId>-T2", …. dependsOn lists epic ids only, no cycles.
+- needs: for each task, the ids of the tasks (in any epic) whose merged result it actually requires — nothing more. A task starts as soon as its needs are done, even if the rest of an upstream epic is still running, so keep needs minimal and precise; this is what lets independent work run in parallel. dependsOn stays as the coarse epic-level summary.
 - writeSet: every repo-relative path the task may create or modify. A path ending in "/" means the whole directory. Tasks that run in parallel should not overlap; overlapping tasks will be serialized by file locks. Use [] for read-only investigation tasks. For types that produce files to be looked at (illustrator, blender, …), give a directory (e.g. "assets/icons/") so they can save side files such as prompts or preview renders next to the result.
 - description: what "done" means, precisely, including how to verify it. Workers only see their own task, the goal, and short summaries of finished tasks.
 - risk (0..1 each): complexity, uncertainty (how likely the first attempt is wrong), blast (how much breaks if it is wrong). This decides which model runs the task: be honest, low risk means a cheap model.
@@ -156,4 +159,18 @@ ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-module.exports = { SCHEMAS, prompts: { plan, work, critique, review } };
+// 計画はあるが task 単位の依存がないとき、それだけを補わせる
+function needs({ goal, tasks }) {
+  return `You are the root orchestrator of an autonomous agent team. The plan below already exists; do not change it. Add only the task-level dependencies.
+
+GOAL:
+${goal}
+
+TASKS (id [status] title — writeSet — description; epic-level dependsOn in brackets):
+${tasks}
+
+For every task that is not done, return needs = the ids of the tasks whose merged result it actually requires (read their descriptions and writeSets; inspect the repository read-only if needed). A task will start as soon as its needs are done, even if other tasks of an upstream epic are still running, so be minimal but correct: include a task only if this one reads its files, calls its code, or uses its outputs. Done tasks may be omitted. reason: one short phrase. No cycles.
+${LANG}`;
+}
+
+module.exports = { SCHEMAS, prompts: { plan, work, critique, review, needs } };

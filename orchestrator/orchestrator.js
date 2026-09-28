@@ -190,8 +190,10 @@ class Orchestrator extends EventEmitter {
     }, 60000);
     this.probePlanSoon(0);
 
-    if (this.cfg.resume && fs.existsSync(this.statePath)) this.restore(JSON.parse(fs.readFileSync(this.statePath, 'utf8')));
-    else await this.plan();
+    if (this.cfg.resume && fs.existsSync(this.statePath)) {
+      this.restore(JSON.parse(fs.readFileSync(this.statePath, 'utf8')));
+      await this.inferNeeds();
+    } else await this.plan();
     this.schedule();
   }
 
@@ -370,6 +372,7 @@ class Orchestrator extends EventEmitter {
       done.add(e.id);
     };
     out.forEach(visit);
+    this.cleanNeeds(out);
     return out;
   }
 
@@ -386,12 +389,57 @@ class Orchestrator extends EventEmitter {
     return own.length >= 3 ? own : policy.LADDERS[kind.runner];
   }
 
+  // task の needs を存在する id に絞り、循環を切る
+  cleanNeeds(epics) {
+    const all = new Map(epics.flatMap((e) => e.tasks).map((t) => [t.id, t]));
+    for (const t of all.values()) if (t.needs) t.needs = t.needs.filter((d) => d !== t.id && all.has(d));
+    const visiting = new Set(), seen = new Set();
+    const visit = (t) => {
+      if (seen.has(t.id) || !t.needs) return;
+      visiting.add(t.id);
+      t.needs = t.needs.filter((d) => {
+        if (visiting.has(d)) { this.log('warn', `task の循環依存 ${t.id} → ${d} を除去`); return false; }
+        visit(all.get(d));
+        return true;
+      });
+      visiting.delete(t.id);
+      seen.add(t.id);
+    };
+    all.forEach(visit);
+  }
+
+  // task が始められるか: needs があればそれだけ、なければ中プロジェクトの dependsOn
+  taskReady(e, t, doneEpics, doneTasks) {
+    return t.needs ? t.needs.every((d) => doneTasks.has(d)) : e.dependsOn.every((d) => doneEpics.has(d));
+  }
+
+  // --resume で読んだ計画に task 単位の依存がなければ、root に補わせる（計画は作り直さない）
+  async inferNeeds() {
+    const tasks = this.state.epics.flatMap((e) => e.tasks.map((t) => ({ e, t })));
+    if (!tasks.some(({ t }) => t.status !== 'done' && !t.needs)) return;
+    const route = policy.judge(this.ladder);
+    const agent = this.rootAgent || this.newAgent('lead', route);
+    this.log('plan', `task 単位の依存を補う（${route.model}/${route.effort}）`);
+    const list = tasks.map(({ e, t }) => `- ${t.id} [${t.status}] ${t.title} — ${t.writeSet.join(', ') || '(none)'} — ${oneLine(t.description, 400)} [epic ${e.id} dependsOn ${e.dependsOn.join(', ') || '-'}]`).join('\n');
+    const res = await this.runAgent(agent, { role: 'planner', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.needs, prompt: prompts.needs({ goal: this.cfg.goal, tasks: list }) });
+    if (!res.ok) { this.log('warn', `依存の補完に失敗（中プロジェクト単位の依存のまま続行）: ${oneLine(res.error)}`); return; }
+    const byId = new Map(tasks.map(({ t }) => [t.id, t]));
+    for (const x of res.output.tasks || []) {
+      const t = byId.get(x.id);
+      if (t && t.status !== 'done') t.needs = x.needs || [];
+    }
+    for (const { t } of tasks) if (!t.needs && t.status === 'done') t.needs = [];
+    this.cleanNeeds(this.state.epics);
+    this.log('plan', `task 単位の依存: ${tasks.filter(({ t }) => t.status !== 'done').map(({ t }) => `${t.id}←${t.needs?.join('+') || '∅'}`).join(' / ')}`);
+  }
+
   newTask(t, epic) {
     return {
       id: String(t.id), title: t.title, description: t.description || '', status: 'todo', agent: null,
       kind: this.kindName(t.kind),
       writeSet: [...new Set((t.writeSet || []).map(normPath).filter(Boolean))],
       risk: t.risk ? normRisk(t.risk) : normRisk(epic.risk),
+      needs: Array.isArray(t.needs) ? [...new Set(t.needs.map(String))] : null, // null = 中プロジェクトの dependsOn に従う
       tokens: 0, costUsd: 0, attempts: [], summary: '', activity: null, grants: [],
     };
   }
@@ -417,15 +465,17 @@ class Orchestrator extends EventEmitter {
     const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && !run.draining && this.activeCount() < w.limits.maxActiveAgents;
 
     const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done').map((e) => e.id));
+    const doneTasks = new Set(this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' || t.status === 'review').map((t) => t.id));
+    const ready = (e, t) => this.taskReady(e, t, doneIds, doneTasks);
     for (const e of this.state.epics) {
-      if (e.status === 'todo' && e.dependsOn.every((d) => doneIds.has(d)) && canSpawn()) {
+      if (e.status === 'todo' && e.tasks.some((t) => t.status === 'todo' && ready(e, t)) && canSpawn()) {
         e.status = 'running';
         this.startEpic(e);
       }
       if (e.status !== 'running') continue;
 
       for (const t of e.tasks) {
-        if (t.status !== 'todo' || !canSpawn()) continue;
+        if (t.status !== 'todo' || !canSpawn() || !ready(e, t)) continue;
         if (!locks.canAcquire(this.state, t)) {
           if (t.agent) this.state.agents[t.agent].state = 'waiting';
           continue;
@@ -441,8 +491,7 @@ class Orchestrator extends EventEmitter {
     let next = 'running';
     if (this.state.epics.length && this.state.epics.every((e) => e.status === 'done')) next = 'done';
     else if (!busy) {
-      const startable = this.state.epics.some((e) => (e.status === 'running' && e.tasks.some((t) => t.status === 'todo')) ||
-        (e.status === 'todo' && e.dependsOn.every((d) => doneIds.has(d))));
+      const startable = this.state.epics.some((e) => ['running', 'todo'].includes(e.status) && e.tasks.some((t) => t.status === 'todo' && ready(e, t)));
       if (run.frozen) next = 'budget-stopped';
       else if (run.planHold) next = 'plan-limit';
       else if (run.protectHold) next = 'protect-hold';
@@ -561,6 +610,13 @@ class Orchestrator extends EventEmitter {
       this.state.agents[t.agent].state = 'finished';
       this.log('done', `${t.id} 完了（${changed.length} ファイル）。ロック解放。${oneLine(out.summary)}`);
     } catch (err) {
+      // オーケストレータの停止・再起動で中断されたなら、失敗に数えず途中の変更を次の試行に持ち込む
+      if (this.shuttingDown) {
+        finish('interrupted', 'オーケストレータの停止・再起動で中断');
+        if (wt && (await this.repo.commitAll(wt, `atv: ${t.id} (中断時点) ${t.title}`).catch(() => [])).length) { wt.keep = true; t.carryBranch = wt.branch; }
+        t.status = 'todo';
+        return;
+      }
       const note = err instanceof Failure ? err.message : `内部エラー: ${err.message}`;
       finish('fail', note.slice(0, 2000));
       if (wt) attempt.diff = await this.repo.attemptDiff(wt).catch(() => '');
