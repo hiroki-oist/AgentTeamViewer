@@ -199,6 +199,10 @@ dialog .critique { margin-top: 6px; padding: 4px 8px; border-left: 2px solid var
 /* ---------- 人間への依頼 ---------- */
 #requests { display: flex; flex-direction: column; gap: 8px; flex: 1; }
 .req { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface); }
+.req-options { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.req-options .opt { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 1px; padding: 5px 8px; height: auto; white-space: normal; }
+.req-options .opt span { font-size: 11px; color: var(--muted); font-weight: 400; }
+.req-options .opt.rec { border-color: var(--accent, #2a6fdb); }
 .req.blocking { border-color: var(--warning); box-shadow: inset 3px 0 0 var(--warning); }
 .req.closed { opacity: .6; }
 .req-head { display: flex; gap: 6px; align-items: baseline; }

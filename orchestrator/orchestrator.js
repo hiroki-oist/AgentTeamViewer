@@ -569,6 +569,7 @@ class Orchestrator extends EventEmitter {
       const te = tasks.get(a.target);
       if (a.type === 'rewrite_request' && r) {
         r.title = oneLine(a.title || r.title, 80); r.detail = String(a.text || r.detail).slice(0, 2000); r.rewrittenBy = 'inspector';
+        if (a.options?.length) { r.options = normOptions(a.options, a.recommended); r.recommended = r.options.find((o) => o.recommended)?.label || ''; }
         done.push(`${r.id} の文面を書き直した`);
       } else if (a.type === 'answer_request' && r && ['decision', 'other'].includes(r.kind)) {
         this.resolveRequest(r.id, { reply: `（点検役が回答）${a.text}` });
@@ -595,7 +596,7 @@ class Orchestrator extends EventEmitter {
         if (te) { te.t[field] = oneLine(a.text, 120); done.push(`${te.t.id} の${field === 'brief' ? '説明' : '見出し'}を書き直した`); }
         else if (epics.get(a.target)) { epics.get(a.target).brief = oneLine(a.text, 120); done.push(`${a.target} の説明を書き直した`); }
       } else if (a.type === 'ask_human') {
-        this.addRequests([{ kind: 'decision', blocking: false, title: oneLine(a.title, 80), detail: String(a.text).slice(0, 2000) }], { from: 'inspector', taskId: tasks.has(a.target) ? a.target : null });
+        this.addRequests([{ kind: 'decision', blocking: false, title: oneLine(a.title, 80), detail: String(a.text).slice(0, 2000), options: a.options, recommended: a.recommended }], { from: 'inspector', taskId: tasks.has(a.target) ? a.target : null });
         done.push(`判断を依頼した: ${oneLine(a.title, 60)}`);
       }
     }
@@ -840,6 +841,8 @@ class Orchestrator extends EventEmitter {
         if (!blocking.length) {
           const waits = t.attempts.filter((a) => a.result === 'waiting').length;
           blocking.push(...this.addRequests([{ kind: 'decision', blocking: true, title: `${t.id}「${t.title}」の待ちが ${waits} 回続いている。続けるか決めてほしい`,
+            options: [{ label: '続けて待つ', description: 'このまま待ちに戻す。ジョブが進んでいるならこれでよい' }, { label: 'やり方を変える', description: '返答欄に指示を書いてから選ぶ。その指示を添えてやり直す' }, { label: 'この task を諦める', description: '却下扱い。別の進め方で再開する' }],
+            recommended: '続けて待つ',
             detail: `エージェントは自分で起動したジョブの完了を待っています: ${out.headline || oneLine(out.summary, 200)}\n\n決めてほしいこと: このまま待ち続けるか、やり方を変えるか。\n- 待たせるなら「続けて」と返信（また自動で待ちに戻ります）\n- やり方を変えるなら、その指示を返信\n- この task を諦めるなら「却下」\n\n詳細: ${out.summary || '(なし)'}${t.carryBranch ? `\n途中の変更はブランチ ${t.carryBranch} に残してあり、次の試行に持ち込みます。` : ''}` }],
           { from: t.agent, taskId: t.id, epicId: e.id }));
           t.attempts.forEach((a) => { if (a.result === 'waiting') a.result = 'waited'; }); // 返答後は待ちの回数を数え直す
@@ -1073,7 +1076,8 @@ class Orchestrator extends EventEmitter {
       const dup = this.state.requests.find((x) => x.status === 'open' && x.taskId === taskId && x.title === r.title);
       if (dup) { added.push(dup); continue; }
       const ids = taskIds || (taskId ? [taskId] : []);
-      const req = { id: `R${++this.reqSeq}`, kind: r.kind, title: r.title, detail: r.detail, blocking: Boolean(r.blocking && ids.length), status: 'open', reply: '', from, taskId: ids[0] || null, taskIds: ids, epicId, createdAt: new Date().toISOString() };
+      const options = normOptions(r.options, r.recommended);
+      const req = { id: `R${++this.reqSeq}`, kind: r.kind, title: r.title, detail: r.detail, options, recommended: options.find((o) => o.recommended)?.label || '', blocking: Boolean(r.blocking && ids.length), status: 'open', reply: '', from, taskId: ids[0] || null, taskIds: ids, epicId, createdAt: new Date().toISOString() };
       this.state.requests.push(req);
       added.push(req);
       this.log('request', `依頼 ${req.id} [${req.kind}] ${req.title}${req.blocking ? '（ブロッキング）' : ''}`);
@@ -1082,9 +1086,16 @@ class Orchestrator extends EventEmitter {
     return added.filter((r) => r.blocking);
   }
 
-  resolveRequest(id, { reply = '', dismiss = false } = {}) {
+  resolveRequest(id, { reply = '', dismiss = false, option = '' } = {}) {
     const r = this.state.requests.find((x) => x.id === id);
     if (!r) throw new Error(`依頼 ${id} が見つからない`);
+    // 選択肢で答えたら、その内容を返答にする（自由記述があれば添える）
+    if (option) {
+      const o = (r.options || []).find((x) => x.label === option);
+      r.choice = option;
+      reply = `「${option}」を選択${o?.description ? `（${o.description}）` : ''}${reply ? `。補足: ${reply}` : ''}`;
+      if (option === 'この task を諦める') dismiss = true;
+    }
     r.status = dismiss ? 'dismissed' : 'resolved';
     r.reply = String(reply).slice(0, 2000);
     r.resolvedAt = new Date().toISOString();
@@ -1152,6 +1163,14 @@ class Failure extends Error {}
 
 // 依頼 r が task t を止めているか
 const blocks = (r, t) => r.blocking && r.status === 'open' && (r.taskIds || [r.taskId]).includes(t.id);
+
+// 選択肢: 推奨を先頭に、4 つまで
+function normOptions(list, recommended) {
+  const opts = (Array.isArray(list) ? list : []).map((o) => ({ label: oneLine(o?.label, 40), description: oneLine(o?.description, 200) })).filter((o) => o.label).slice(0, 4);
+  const i = opts.findIndex((o) => o.label === oneLine(recommended, 40));
+  if (i > 0) opts.unshift(...opts.splice(i, 1));
+  return opts.map((o, k) => ({ ...o, recommended: k === 0 && i >= 0 }));
+}
 
 const oneLine = (s, n = 120) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 const normRisk = (r = {}) => ({ complexity: clamp01(r.complexity ?? 0.5), uncertainty: clamp01(r.uncertainty ?? 0.5), blast: clamp01(r.blast ?? 0.5) });

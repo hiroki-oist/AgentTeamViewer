@@ -99,7 +99,7 @@ run が終わったら、root が作った型（`.atv/<runId>/kinds/*.md`）を�
 
 - **進捗は？**: `run.status`、完了した task 数、実行中の task とその `activity`、直近の `events` 5 件、`watchdog` の使用量と予算、未対応の `requests` を短くまとめる
 - **依頼に答える**: 未対応の依頼（`status: "open"`）を、ブロッキングのものから見せる。インストールや認証のようにユーザー本人の操作が必要なものは、手順を示して、終わったら教えてもらう（秘密情報をチャットに貼らせない）。この repo の中で済むこと（設定ファイルの追記など）は、ユーザーの了承を得てから自分でやってよい。済んだら返答する:
-  `curl -s -XPOST <url>api/requests/<id> -H 'content-type: application/json' -d '{"reply":"<返答>"}'`（対応しないなら `"dismiss": true`）
+  `curl -s -XPOST <url>api/requests/<id> -H 'content-type: application/json' -d '{"reply":"<返答>"}'`（選択肢のある依頼は `{"option":"<選択肢のラベル>","reply":"<補足>"}`。ユーザーに聞くときは、依頼の選択肢と推奨をそのまま AskUserQuestion の選択肢にする）（対応しないなら `"dismiss": true`）
 - **なぜ詰まっているか**: `status: "critique"` の task は critic が検証中。`critiques[]` に critic の結果（`verdict`、`diagnosis`、`flawedAssumptions`、`unansweredQuestions`、`guidance`）があるので、それを要約して伝える。critic の診断に納得できないとユーザーが言ったら、その理由を依頼への返答か goal ファイルの補足として渡す
 - **失敗した task**（`status: "failed"`）: その task の `attempts[].note` と `critiques[]` を読んで原因を説明する。再試行させるなら `{"action":"retry","taskId":"<id>"}`
 - **差し戻しの上限で止まった epic**（`review.verdict: "needs-human"`）: レビューの note を説明する。ユーザーが承認するなら `{"action":"approve","epicId":"<id>"}`

@@ -317,13 +317,17 @@
 
     const item = (r) => {
       const where = [r.taskId || r.epicId || 'プロジェクト全体', r.from && `from ${r.from}`, r.createdAt && hhmm(new Date(r.createdAt))].filter(Boolean).join(' · ');
+      const opts = r.status === 'open' && r.options?.length
+        ? `<div class="req-options">${r.options.map((o) => `<button class="btn opt ${o.recommended ? 'rec' : ''}" data-option="${esc(o.label)}" data-req-id="${esc(r.id)}" ${live ? '' : 'disabled'} title="${esc(o.description)}">
+            <b>${esc(o.label)}${o.recommended ? '（推奨）' : ''}</b><span>${esc(o.description)}</span></button>`).join('')}</div>`
+        : '';
       const actions = r.status === 'open'
-        ? `<div class="req-reply">
-            <input data-req="${esc(r.id)}" placeholder="返答（任意）: 例「設定済み」「MIT で」" aria-label="${esc(r.id)} への返答">
+        ? `${opts}<div class="req-reply">
+            <input data-req="${esc(r.id)}" placeholder="${r.options?.length ? '補足や別の答え（任意）。選択肢を押すと一緒に送られる' : '返答（任意）: 例「設定済み」「MIT で」'}" aria-label="${esc(r.id)} への返答">
             <button class="btn" data-resolve="${esc(r.id)}" ${live ? '' : 'disabled title="ライブ接続時のみ"'}>対応済み</button>
             <button class="btn ghost" data-dismiss="${esc(r.id)}" ${live ? '' : 'disabled'}>却下</button>
           </div>`
-        : `<div class="req-answer">${r.status === 'dismissed' ? '却下' : '対応済み'}${r.reply ? `: ${esc(r.reply)}` : ''}</div>`;
+        : `<div class="req-answer">${r.status === 'dismissed' ? '却下' : r.choice ? `選択: ${esc(r.choice)}` : '対応済み'}${r.reply && !r.choice ? `: ${esc(r.reply)}` : ''}</div>`;
       return `<div class="req ${r.blocking && r.status === 'open' ? 'blocking' : ''} ${r.status !== 'open' ? 'closed' : ''}">
           <div class="req-head"><span class="req-kind">${REQ_KIND[r.kind] || esc(r.kind)}</span><span class="req-title">${esc(r.title)}</span></div>
           <div class="req-meta">${esc(r.id)} · ${esc(where)}${r.blocking ? ' · <b>この task は停止中</b>' : ''}</div>
@@ -576,6 +580,12 @@
     if (approve) post('api/control', { action: 'approve', epicId: approve.dataset.approve });
   });
   $('#requests').addEventListener('click', (ev) => {
+    const opt = ev.target.closest('[data-option]');
+    if (opt && live) {
+      const id = opt.dataset.reqId;
+      const note = $(`#requests input[data-req="${CSS.escape(id)}"]`)?.value || '';
+      return post(`api/requests/${encodeURIComponent(id)}`, { option: opt.dataset.option, reply: note });
+    }
     const b = ev.target.closest('[data-resolve],[data-dismiss]');
     if (!b || !live) return;
     const id = b.dataset.resolve || b.dataset.dismiss;

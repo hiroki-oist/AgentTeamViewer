@@ -143,6 +143,9 @@ ATV.dummyState = () => ({
 
   // 人間への依頼。エージェントが自力で解決できないもの（インストール・認証・権限・判断）
   requests: [
+    { id: 'R4', kind: 'decision', title: '専門モデルの学習ステップ数を決めてほしい', detail: '区間が短いので、PredVLA と同じ 3 万ステップは多すぎる可能性がある。1 本あたりの時間が学習全体の終わる時刻を大きく左右する。',
+      options: [{ label: '1 万ステップ', description: '1 本 約 27 分。7 シード × 25 スキルで約 1 日。短すぎて性能が落ちる恐れは小さい', recommended: true }, { label: '3 万ステップ', description: 'PredVLA と同じ条件。約 3 日かかる' }, { label: 'まず 3 スキルで比べる', description: '1 万と 3 万を 3 スキルだけで試し、差を見てから決める（半日遅れる）' }],
+      recommended: '1 万ステップ', blocking: false, status: 'open', reply: '', from: 'inspector-9', taskId: null, epicId: 'E3', createdAt: '2026-09-28T22:18:00+09:00' },
     { id: 'R1', kind: 'auth', title: 'Hugging Face のトークンを設定してほしい', detail: 'OpenVLA の重みの取得に必要です。`huggingface-cli login` を実行するか、`HF_TOKEN` を環境変数に設定してから返信してください。',
       blocking: true, status: 'open', reply: '', from: 'w-E3-1', taskId: 'E3-T1', epicId: 'E3', createdAt: '2026-09-28T22:12:00+09:00' },
     { id: 'R2', kind: 'install', title: 'MuJoCo 3.x を入れてほしい', detail: '`pip install mujoco==3.2.*` が sandbox から実行できません。手元の環境で入れてください（なくても他の task は進められます）。',

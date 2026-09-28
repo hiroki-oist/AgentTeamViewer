@@ -8,11 +8,14 @@ const strs = { type: 'array', items: str };
 const risk = obj({ complexity: num, uncertainty: num, blast: num });
 
 // 人間への依頼。エージェントが自力では解決できないもの（インストール・認証・権限・判断）
+const option = obj({ label: str, description: str });
 const humanRequest = obj({
   kind: { type: 'string', enum: ['install', 'auth', 'access', 'decision', 'other'] },
   title: str,
   detail: str,
   blocking: { type: 'boolean' },
+  options: { type: 'array', items: option },
+  recommended: str,
 });
 
 const SCHEMAS = {
@@ -46,6 +49,7 @@ const SCHEMAS = {
       items: obj({
         type: { type: 'string', enum: ['rewrite_request', 'answer_request', 'nudge_task', 'restart_task', 'rewrite_text', 'ask_human'] },
         target: str, title: str, text: str, reason: str,
+        options: { type: 'array', items: option }, recommended: str,
       }),
     },
     improvements: strs,
@@ -84,7 +88,8 @@ const LANG = 'Write every human-facing text field (titles, summaries, notes, req
 // ボードは人との情報共有の場。人が一目で読む欄と、エージェント向けの詳しい欄を分ける
 const HUMAN = `Fields a person reads at a glance on the shared board (title, brief, headline, note, request title) must be plain language for someone who has not read the code: say what and why (or what happened), not how. No file paths, function or variable names, flags, or step-by-step details there — those go in description / summary / detail, which only agents and curious humans open. One sentence; brief and headline about 40 Japanese characters, title about 20.`;
 
-const REQUESTS_RULE = `If you are blocked by something only the human can do (install an app or system package, log in / grant an API key or OAuth, grant access to a resource, make a product decision), do NOT work around it silently: add an entry to humanRequests with concrete steps for the human (exact command, URL, env var name). Set blocking=true only if you cannot finish without it. Never ask for secrets to be pasted into the chat; ask the human to put them in an env var or a local file and tell you the name.`;
+const REQUESTS_RULE = `If you are blocked by something only the human can do (install an app or system package, log in / grant an API key or OAuth, grant access to a resource, make a product decision), do NOT work around it silently: add an entry to humanRequests with concrete steps for the human (exact command, URL, env var name). Set blocking=true only if you cannot finish without it. Never ask for secrets to be pasted into the chat; ask the human to put them in an env var or a local file and tell you the name.
+When you ask for a decision or an opinion (kind "decision"), always offer 2-4 concrete, mutually exclusive options: label = a few words (what the person would pick), description = what happens and the trade-off. Put the one you recommend first and set recommended to its label (the person can still write something else). For install/auth/access requests, options = [] and recommended = "" unless there is a real choice to make.`;
 
 function plan({ goal, checkCommand, maxTasks, catalog }) {
   return `You are the root orchestrator of an autonomous agent team. You do not write code. Your job is to turn the goal below into a dependency-aware task graph that cheap worker agents can execute in parallel.
@@ -283,7 +288,8 @@ Actions you may take (target = request id like "R3" or task id like "E5-T1"):
 - nudge_task: attach a note that the task's next attempt will read (e.g. "update progress every 5 minutes; run the rendering with nohup and return waiting").
 - restart_task: stop a running task now and retry it with the note in text; its partial work is kept. Only for a task that is clearly stuck: ${rules.restart}.
 - rewrite_text: replace a task's headline (title field = "headline") or brief (title = "brief"), or an epic's brief, with plain text in text.
-- ask_human: raise a new request when only the person can decide something (title + text with the concrete question and answer options).
+- ask_human: raise a new request when only the person can decide something (title + text with the concrete question). Give 2-4 options in "options" (label + description) with the recommended one first, and its label in "recommended".
+- rewrite_request may also add options/recommended to a decision request that lacks them.
 Take no action when things are fine. Do not repeat an action that the board shows was already taken.
 findings: short plain notes of what you saw (also when you took no action), [] if nothing.
 improvements: problems whose cause is the orchestrator's own design (not this project), as concrete suggestions for its developer; [] if none.
