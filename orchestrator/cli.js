@@ -207,6 +207,8 @@ const cfg = {
     await orch.shutdown();
     orch.persistNow();
     if (shared) await shared.off();
+    // ボードの SSE 接続が開いたままだと close が終わらないので、先に全部切る（ブラウザは自動で繋ぎ直す）
+    server.closeAllConnections?.();
     await new Promise((r) => server.close(r));
     const out = fs.openSync(orch.logPath || '/dev/null', 'a');
     const child = require('node:child_process').spawn(process.execPath, [__filename, ...(orch.configArgs || dropFlags(argv)), '--resume'], { detached: true, stdio: ['ignore', out, out], cwd: process.cwd(), env: process.env });

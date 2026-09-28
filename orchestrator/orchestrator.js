@@ -563,7 +563,8 @@ class Orchestrator extends EventEmitter {
 
       // 権限が足りずに止まっただけなら、③ で広げて人間を煩わせずにやり直す
       if (out.status === 'blocked' && granted.length && (out.humanRequests || []).every((r) => r.kind === 'access')) {
-        finish('blocked', `権限不足 → ${granted.join(', ')} を許可して再試行`);
+        if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
+        finish('blocked', `権限不足 → ${granted.join(', ')} を許可して再試行${t.carryBranch ? '（途中の変更は持ち込む）' : ''}`);
         t.status = 'todo';
         return;
       }
