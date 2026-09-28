@@ -11,7 +11,23 @@ const { Orchestrator } = require('./orchestrator.js');
 const { serve } = require('./server.js');
 const tailscale = require('./tailscale.js');
 
+// --resume のときは、前回の起動時の引数（.atv/<runId>/config.json）を土台にし、今回の引数で上書きする。
+//   atv --repo <repo> --run-id <id> --resume だけで、同じ設定・最新版のコードで続きから立ち上がる
+const argvNow = process.argv.slice(2);
+const argOf = (name) => { const i = argvNow.indexOf(name); return i >= 0 ? argvNow[i + 1] : null; };
+const RESTART_DROP = new Set(['--resume', '--paused']);
+const dropFlags = (args) => args.filter((a) => !RESTART_DROP.has(a));
+let savedArgs = [];
+if (argvNow.includes('--resume') && argOf('--repo') && argOf('--run-id')) {
+  try {
+    const root = execFileSync('git', ['-C', path.resolve(argOf('--repo')), 'rev-parse', '--show-toplevel']).toString().trim();
+    savedArgs = JSON.parse(fs.readFileSync(path.join(root, '.atv', argOf('--run-id'), 'config.json'), 'utf8')).args || [];
+  } catch { /* 保存がなければ今回の引数だけで動く */ }
+}
+const argv = [...dropFlags(savedArgs), ...argvNow];
+
 const { values: v } = parseArgs({
+  args: argv,
   options: {
     repo: { type: 'string' },
     goal: { type: 'string' },
@@ -42,6 +58,7 @@ const { values: v } = parseArgs({
     'codex-sandbox': { type: 'string', default: 'workspace-write' },
     'codex-model': { type: 'string', default: '' },
     paused: { type: 'boolean', default: false },
+    resume: { type: 'boolean', default: false },
     tailscale: { type: 'boolean', default: false },
     'run-id': { type: 'string', default: '' },
     help: { type: 'boolean', short: 'h', default: false },
@@ -76,6 +93,7 @@ if (v.help || !v.repo || !(v.goal || v['goal-file'])) {
   --worker-tools "<list>"  worker に追加で許可するツール（既定 "Bash"。例: "Bash(python3:*),Bash(pytest:*)" で絞る）
   --codex-sandbox workspace-write|danger-full-access            worker の sandbox（既定 workspace-write）
   --paused                計画だけ立てて一時停止状態で待つ（ボードで ▶ 再開）
+  --resume                同じ --run-id の .atv/<runId>/state.json から続きを始める（計画し直さない。統合ブランチもそのまま使う）
   --tailscale             ボードを tailnet 内の他の端末にも公開する（tailscale serve。終了時に解除）
   --port N                ボードのポート（既定 8000。使用中なら次の番号を使う）
   --run-id <id>           run の ID（既定は日時）。接続先は <repo>/.atv/<id>/server.json に書き出す`);
@@ -115,6 +133,7 @@ const cfg = {
   protect: v.protect.split(',').map((x) => x.trim().replace(/^~(?=\/|$)/, process.env.HOME)).filter(Boolean),
   bwrap: v.bwrap,
   startPaused: v.paused,
+  resume: v.resume,
   runId: v['run-id'],
   claudePermissionMode: v['claude-permission-mode'],
   workerTools: v['worker-tools'],
@@ -128,8 +147,9 @@ const cfg = {
   const orch = new Orchestrator(cfg);
   // ポートが使用中なら次の番号を試す
   let port = num('port');
+  let server = null;
   for (;;) {
-    try { await serve(orch, { port }); break; } catch (err) {
+    try { server = await serve(orch, { port }); break; } catch (err) {
       if (err.code !== 'EADDRINUSE' || port >= num('port') + 20) { console.error(err.message); process.exit(1); }
       port++;
     }
@@ -160,6 +180,12 @@ const cfg = {
     const dir = path.join(root, '.atv', orch.runId);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'server.json'), JSON.stringify({ runId: orch.runId, pid: process.pid, port, url, tailnetUrl: shared?.url || null }, null, 1));
+    // 再起動（--resume）で同じ設定を使えるよう、起動時の引数を残す。run-id は必ず固定する
+    const keep = dropFlags(argv);
+    if (!keep.includes('--run-id')) keep.push('--run-id', orch.runId);
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ args: keep, savedAt: new Date().toISOString() }, null, 1));
+    orch.logPath = path.join(dir, 'orchestrator.log');
+    orch.configArgs = keep;
   } catch { /* git repo でなければ start() がエラーを出す */ }
 
   const stop = async () => {
@@ -170,6 +196,24 @@ const cfg = {
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+
+  // 安全な再起動: 新規 spawn を止め、（drain なら）実行中の agent を最後まで走らせてから状態を保存し、
+  // 最新版のコードで同じ引数 + --resume の新しいプロセスを立ち上げてから抜ける
+  orch.on('restart', async ({ mode }) => {
+    if (mode === 'drain') {
+      while (orch.activeCount() > 0 || orch.inflight.size > 0) await new Promise((r) => setTimeout(r, 2000));
+    }
+    orch.log('control', `再起動します（${mode === 'drain' ? '実行中の agent の完了後' : '実行中の agent を中断'}）。最新版のコードで --resume`);
+    await orch.shutdown();
+    orch.persistNow();
+    if (shared) await shared.off();
+    await new Promise((r) => server.close(r));
+    const out = fs.openSync(orch.logPath || '/dev/null', 'a');
+    const child = require('node:child_process').spawn(process.execPath, [__filename, ...(orch.configArgs || dropFlags(argv)), '--resume'], { detached: true, stdio: ['ignore', out, out], cwd: process.cwd(), env: process.env });
+    child.unref();
+    console.log(`新しいプロセス ${child.pid} に引き継ぎました`);
+    process.exit(0);
+  });
 
   try {
     await orch.start();

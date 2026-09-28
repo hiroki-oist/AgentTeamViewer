@@ -77,7 +77,7 @@ h2 { font-size: 13px; color: var(--ink-2); display: flex; gap: 8px; align-items:
 .run-pill[hidden] { display: none; }
 .run-pill.running { color: var(--accent); }
 .run-pill.done { color: var(--good); }
-.run-pill.waiting-human, .run-pill.paused, .run-pill.budget-stopped, .run-pill.plan-limit, .run-pill.protect-hold { color: var(--warning); }
+.run-pill.waiting-human, .run-pill.paused, .run-pill.budget-stopped, .run-pill.plan-limit, .run-pill.protect-hold, .run-pill.restarting { color: var(--warning); }
 .run-pill.stuck, .run-pill.failed { color: var(--critical); }
 .now { margin: 6px 0 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .now:empty { display: none; }

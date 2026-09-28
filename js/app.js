@@ -14,7 +14,7 @@
   const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔' };
   const STATUS_LABEL = { ok: '✓ OK', warn: '▲ WARN', crit: '✕ CRIT' };
   const ALERT_ICON = { ok: '✓', warn: '▲', crit: '✕' };
-  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', 'protect-hold': '保護パスで停止', done: '完了', failed: '失敗' };
+  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', 'protect-hold': '保護パスで停止', restarting: '再起動中', done: '完了', failed: '失敗' };
   const CRITIC_VERDICT = { change_approach: 'やり方を変える', task_is_wrong: 'task を定義し直す', needs_human: '人間の判断が必要' };
   const REQ_KIND = { install: 'インストール', auth: '認証', access: '権限', decision: '判断', other: 'その他' };
 
@@ -418,6 +418,11 @@
   $('#sim-toggle').addEventListener('click', () => {
     if (live) return post('api/control', { action: state.run.paused ? 'resume' : 'pause' });
     simTimer ? stopSim() : startSim();
+  });
+  $('#restart').addEventListener('click', () => {
+    if (!live) return;
+    if (confirm('最新版のコードで、設定と状態を引き継いで再起動します。\n実行中のエージェントが終わるのを待ってから再起動しますか？\n（キャンセルすると「今すぐ中断して再起動」を選べます）')) post('api/control', { action: 'restart', mode: 'drain' });
+    else if (confirm('実行中のエージェントを中断して、今すぐ再起動しますか？（中断した task は次の起動で最初からやり直します）')) post('api/control', { action: 'restart', mode: 'now' });
   });
   $('#protect-ok').addEventListener('click', () => {
     if (confirm('保護パスの変更を確認しました（エージェントの書き込みは元に戻した / 自分の編集だった）。今の状態を新しい基準にして再開します。よろしいですか？')) post('api/control', { action: 'protect-ok' });

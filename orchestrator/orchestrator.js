@@ -190,8 +190,53 @@ class Orchestrator extends EventEmitter {
     }, 60000);
     this.probePlanSoon(0);
 
-    await this.plan();
+    if (this.cfg.resume && fs.existsSync(this.statePath)) this.restore(JSON.parse(fs.readFileSync(this.statePath, 'utf8')));
+    else await this.plan();
     this.schedule();
+  }
+
+  // 前の run の state.json から続きを始める（計画・task の状態・依頼・使用量を引き継ぐ）。
+  // 実行中だったものは中断扱いで todo に戻し、レビュー中だった epic はレビューし直す
+  restore(prev) {
+    const s = this.state;
+    s.project = prev.project;
+    s.requests = prev.requests || [];
+    s.events = [...(prev.events || []), { t: hhmm(), kind: 'start', msg: '--resume: 前の状態から再開' }];
+    s.run.startedAt = prev.run?.startedAt || s.run.startedAt;
+    s.run.checkCommand = this.cfg.check || prev.run?.checkCommand || '';
+    // 予算・上限は今回の指定を使い、使用量と利用枠の起点は引き継ぐ
+    const w = s.watchdog, pw = prev.watchdog || {};
+    w.usedTokens = pw.usedTokens || 0;
+    w.usedCostUsd = pw.usedCostUsd || 0;
+    w.plan = pw.plan || null;
+    const known = new Set(Object.keys(prev.agents || {}));
+    s.agents = { ...s.agents, ...Object.fromEntries(Object.entries(prev.agents || {}).filter(([k]) => k !== 'watchdog').map(([k, a]) => [k, { ...a, state: a.state === 'active' ? 'waiting' : a.state, activity: null }])) };
+    this.agentSeq = Math.max(0, ...[...known].map((k) => Number(k.split('-').pop()) || 0));
+    this.reqSeq = Math.max(0, ...s.requests.map((r) => Number(String(r.id).replace(/^R/, '')) || 0));
+    this.rootAgent = Object.keys(s.agents).find((k) => s.agents[k].role === 'lead');
+    const openBlock = (t) => s.requests.some((r) => r.blocking && r.status === 'open' && (r.taskIds || [r.taskId]).includes(t.id));
+    s.epics = (prev.epics || []).map((e) => {
+      if (e.status === 'review') { e.status = 'running'; e.review = null; }
+      e.tasks = e.tasks.map((t) => {
+        const n = { ...this.newTask(t, e), ...t, kind: this.kindName(t.kind), grants: t.grants || [], activity: null };
+        for (const a of n.attempts) if (a.result === 'running') { a.result = 'interrupted'; a.note = 'オーケストレータの再起動で中断'; }
+        if (['running', 'critique', 'review'].includes(n.status)) n.status = n.status === 'review' ? 'done' : 'todo';
+        // 依頼なしで止まっていた task（旧版のバグ）は、そのまま続けさせる
+        if (n.status === 'blocked' && !openBlock(n)) { n.status = 'todo'; this.log('start', `${n.id}: 依頼なしで止まっていたので再開`); }
+        return n;
+      });
+      return e;
+    });
+    this.fallbackKind = {};
+    const n = s.epics.reduce((a, e) => a + e.tasks.length, 0), done = s.epics.reduce((a, e) => a + e.tasks.filter((t) => t.status === 'done').length, 0);
+    s.run.status = 'running';
+    this.log('start', `前の状態から再開: 中プロジェクト ${s.epics.length} 件 / task ${n} 件（完了 ${done} 件）。使用量 ${w.usedTokens} tok / $${w.usedCostUsd.toFixed(2)} を引き継ぎ`);
+  }
+
+  persistNow() {
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
+    if (this.statePath) fs.writeFileSync(this.statePath, JSON.stringify(this.state, null, 1));
   }
 
   persistSoon() {
@@ -356,6 +401,7 @@ class Orchestrator extends EventEmitter {
     const run = this.state.run;
     if (this.shuttingDown) return;
     if (!['running', 'paused', 'waiting-human', 'stuck', 'budget-stopped', 'plan-limit', 'protect-hold', 'done'].includes(run.status)) return;
+    if (run.draining) { this.changed(); return; } // 再起動待ち。実行中の agent は各自の finally から戻ってくる
     const lockInfo = locks.compute(this.state);
     const wd = watchdog.evaluate(this.state, lockInfo);
     const w = this.state.watchdog;
@@ -368,7 +414,7 @@ class Orchestrator extends EventEmitter {
     if (vkey && vkey !== this.lastViolation) this.log('watchdog', `ロック違反を検出: ${vkey}`);
     this.lastViolation = vkey;
     this.checkPlan();
-    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && this.activeCount() < w.limits.maxActiveAgents;
+    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && !run.draining && this.activeCount() < w.limits.maxActiveAgents;
 
     const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done').map((e) => e.id));
     for (const e of this.state.epics) {
@@ -532,7 +578,7 @@ class Orchestrator extends EventEmitter {
     } finally {
       if (wt) await this.repo.removeWorktree(wt);
       this.changed();
-      if (needCritic && !this.shuttingDown) await this.runCritic(e, t);
+      if (needCritic && !this.shuttingDown && !this.state.run.draining) await this.runCritic(e, t); // 再起動待ちなら critic は次のプロセスで
       else if (!this.shuttingDown) this.schedule();
     }
   }
@@ -632,7 +678,7 @@ class Orchestrator extends EventEmitter {
   }
 
   previousEvidence(t) {
-    const last = [...t.attempts].reverse().find((a) => a.result === 'fail');
+    const last = [...t.attempts].reverse().find((a) => ['fail', 'blocked', 'interrupted'].includes(a.result));
     return last ? `(${last.model}/${last.effort}) ${last.note}` : '';
   }
 
@@ -736,6 +782,14 @@ class Orchestrator extends EventEmitter {
       w.budget.costUsd = Math.round(w.budget.costUsd * 1.5 * 100) / 100;
       run.frozen = false;
       this.log('control', `予算を 1.5 倍に拡張して再開（${w.budget.tokens} tok / $${w.budget.costUsd}）`);
+    } else if (action === 'restart') {
+      if (run.draining) throw new Error('再起動の準備中');
+      const mode = arg.mode === 'now' ? 'now' : 'drain';
+      run.draining = true;
+      run.status = 'restarting';
+      this.log('control', mode === 'drain' ? '再起動を準備中: 新規 spawn を止め、実行中の agent の完了を待つ' : '今すぐ再起動: 実行中の agent を中断する');
+      this.emit('restart', { mode });
+      return;
     } else if (action === 'protect-ok') {
       if (!run.protectHold) throw new Error('保護パスで止まっていない');
       run.protectHold = null;

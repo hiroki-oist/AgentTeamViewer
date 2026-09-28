@@ -62,6 +62,12 @@ P
 sudo apparmor_parser -r /etc/apparmor.d/bwrap
 ```
 
+### 中断と再起動（設定と状態を引き継ぐ）
+
+- **ボードの「⟳ 再起動」**: 新規 spawn を止め、実行中のエージェントが終わるのを待ってから（または今すぐ中断して）状態を保存し、**最新版のコード**で同じ引数 + `--resume` の新しいプロセスを立ち上げてから抜ける。atv を更新したときや、様子がおかしいときに使う。API は `{"action":"restart","mode":"drain"|"now"}`
+- **プロセスが落ちている・止まっているとき**: `atv --repo <repo> --run-id <runId> --resume`。起動時の引数は `.atv/<runId>/config.json` に保存してあり、それを土台に今回の引数で上書きする（例: `--max-agents 6` を足す）。goal ファイルも読み直すので、goal を直してから再開できる
+- `--resume` は `.atv/<runId>/state.json` から計画・task の状態・依頼・使用量・利用枠の起点を引き継ぎ、統合ブランチもそのまま使う（計画し直さない）。実行中だった task は中断扱いで todo に戻り、レビュー中だった中プロジェクトはレビューし直す
+
 `index.html` を直接開くか、サーバーなしで配信した場合は、ダミーデータのデモモードで動く（`?autoplay` でシミュレーション自動開始）。
 
 作業は対象 repo の `.atv/<runId>/` 以下の worktree で行い、元の作業ツリーには触れない（`.atv/` は `.git/info/exclude` に追加される）。完了したら統合ブランチ `atv/<runId>/main` を確認してから自分でマージする。
