@@ -49,8 +49,9 @@ body { margin: 0; background: var(--page); color: var(--ink); font-size: 13px; l
   height: 100vh; height: 100dvh; padding: 12px; gap: 10px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 380px;
-  grid-template-rows: 204px minmax(0, 1fr) minmax(0, 26%);
-  grid-template-areas: "goal watch" "board requests" "locks events";
+  /* 右列だけ 2 行目まで監視役に使う（監視役の中身が増えたので）。そのぶん「あなたへの依頼」が短くなる。左列の高さは変えない */
+  grid-template-rows: 204px 100px minmax(0, 1fr) minmax(0, 26%);
+  grid-template-areas: "goal watch" "board watch" "board requests" "locks events";
 }
 .app > * { min-height: 0; min-width: 0; }
 .panel { display: flex; flex-direction: column; }
