@@ -254,6 +254,7 @@ class Orchestrator extends EventEmitter {
     s.events = [...(prev.events || []), { t: hhmm(), kind: 'start', msg: '--resume: 前の状態から再開' }];
     s.run.startedAt = prev.run?.startedAt || s.run.startedAt;
     s.run.checkCommand = this.cfg.check || prev.run?.checkCommand || '';
+    s.run.codexSandboxed = Boolean(prev.run?.codexSandboxed);
     // 予算・上限は今回の指定を使い、使用量と利用枠の起点は引き継ぐ
     const w = s.watchdog, pw = prev.watchdog || {};
     w.usedTokens = pw.usedTokens || 0;
@@ -454,8 +455,11 @@ class Orchestrator extends EventEmitter {
   }
 
   // 型が runner を指定していればその梯子を使う（mock はすべて mock）
-  ladderFor(kind) {
-    if (this.cfg.ladder === 'mock' || kind.runner === 'any') return this.ladder;
+  ladderFor(kind, t = null) {
+    if (this.cfg.ladder === 'mock') return this.ladder;
+    // codex の sandbox で止まった task・run では、どの runner でもよい型を Claude で動かす
+    if (kind.runner !== 'codex' && (t?.runnerPin === 'claude' || (this.state.run.codexSandboxed && this.cfg.codexSandbox !== 'danger-full-access'))) return policy.LADDERS.claude;
+    if (kind.runner === 'any') return this.ladder;
     const own = this.ladder.filter((r) => r.runner === kind.runner);
     return own.length >= 3 ? own : policy.LADDERS[kind.runner];
   }
@@ -799,7 +803,7 @@ class Orchestrator extends EventEmitter {
   async attemptTask(e, t) {
     const failures = t.attempts.filter((a) => a.result === 'fail').length;
     const kind = this.kinds.get(t.kind);
-    const route = policy.route(t.risk, failures, this.ladderFor(kind), kind.floor);
+    const route = policy.route(t.risk, failures, this.ladderFor(kind, t), kind.floor);
     if (!t.agent) t.agent = this.newAgent('worker', route);
     Object.assign(this.state.agents[t.agent], { runner: route.runner, model: route.model, effort: route.effort });
     const attempt = { model: route.model, effort: route.effort, runner: route.runner, result: 'running', startedAt: new Date().toISOString(), tokens: 0 };
@@ -848,7 +852,7 @@ class Orchestrator extends EventEmitter {
         tools: [...kind.tools, ...t.grants], disallowed: GUARD.claudeDisallowed,
         replies: this.repliesFor(t.id),
         critique: this.critiqueFor(t),
-        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}`, note: (t.notes || []).slice(-2).join('\n') }),
+        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}`, note: (t.notes || []).slice(-2).join('\n'), sandbox: route.runner === 'codex' && this.cfg.codexSandbox !== 'danger-full-access' ? this.cfg.codexSandbox : null }),
         onActivity: (text) => { t.activity = text; },
       }, (d) => { t.tokens += d; attempt.tokens += d; });
       const granted = this.grantFromDenials(t, res.denials);
@@ -861,6 +865,19 @@ class Orchestrator extends EventEmitter {
         if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
         finish('blocked', `権限不足 → ${granted.join(', ')} を許可して再試行${t.carryBranch ? '（途中の変更は持ち込む）' : ''}`);
         t.status = 'todo';
+        return;
+      }
+      // codex の sandbox（ネットワーク・ローカル IPC の遮断）で止まったなら、人間に曖昧な依頼を出さずに自分で対処する
+      if (out.status === 'blocked' && this.sandboxBlocked(route, out)) {
+        if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
+        if (this.onSandboxBlock(e, t, kind, out)) {
+          finish('blocked', `Codex の sandbox で止まった → Claude で再試行${t.carryBranch ? '（途中の変更は持ち込む）' : ''}: ${oneLine(out.summary, 200)}`);
+          t.status = 'todo';
+        } else {
+          finish('blocked', out.summary);
+          attempt.headline = out.headline || '';
+          t.status = 'blocked';
+        }
         return;
       }
       const blocking = this.addRequests(out.humanRequests, { from: t.agent, taskId: t.id, epicId: e.id });
@@ -1113,6 +1130,39 @@ class Orchestrator extends EventEmitter {
     this.schedule();
   }
 
+  // ---------- codex の sandbox で止まったとき ----------
+  sandboxBlocked(route, out) {
+    if (route.runner !== 'codex' || this.cfg.codexSandbox === 'danger-full-access') return false;
+    const reqs = out.humanRequests || [];
+    if (reqs.some((r) => r.kind === 'sandbox')) return true;
+    const text = [out.headline, out.summary, ...reqs.flatMap((r) => [r.title, r.detail])].join('\n');
+    return SANDBOX_RE.test(text);
+  }
+
+  // Claude に回せたら true。回せない（型が codex 専用・梯子が codex だけ）なら、何を変えればよいかを書いた依頼を出して false
+  onSandboxBlock(e, t, kind, out) {
+    const run = this.state.run;
+    const why = oneLine((out.humanRequests || []).map((r) => r.detail).filter(Boolean).join(' / ') || out.summary, 400);
+    const widen = `Codex を sandbox なしで動かすには、\`.atv/${this.runId}/config.json\` の "args" に "--codex-sandbox", "danger-full-access" を足してから、ボードの「⟳ 再起動」（drain）を押してください。Codex の worker が確認なしで、この worktree の外やネットワークにも触れるようになります。`;
+    const movable = kind.runner !== 'codex' && this.cfg.ladder !== 'codex';
+    if (movable) {
+      t.runnerPin = 'claude';
+      this.log('escalate', `${t.id}: Codex の sandbox で止まったので Claude で再試行する（${oneLine(why, 120)}）`);
+      if (!run.codexSandboxed) {
+        run.codexSandboxed = true;
+        this.addRequests([{ kind: 'sandbox', blocking: false, title: 'Codex の制限で動かない作業を Claude に回した',
+          detail: `${t.id}「${t.title}」が Codex の sandbox（${this.cfg.codexSandbox}: ネットワークとローカル IPC を遮断）の中で止まりました: ${why}\n\nこの run では以後、どの runner でもよい型の task を Claude で動かします（対応は不要です）。\n${widen}` }],
+        { from: t.agent, taskId: t.id, epicId: e.id });
+      }
+      return true;
+    }
+    this.addRequests([{ kind: 'sandbox', blocking: true, title: `${t.id}「${t.title}」が Codex の制限で止まった`,
+      detail: `この型（${kind.name}）は Codex でしか動かないため、Claude に回せません。Codex の sandbox（${this.cfg.codexSandbox}）の中で止まった理由: ${why}\n\n${widen}\n再起動のあと、この依頼に返答すると再開します。${t.carryBranch ? `\n途中の変更はブランチ ${t.carryBranch} に残してあり、次の試行に持ち込みます。` : ''}` }],
+    { from: t.agent, taskId: t.id, epicId: e.id });
+    this.log('request', `${t.id} は人間待ち: Codex の sandbox で止まり、Claude にも回せない`);
+    return false;
+  }
+
   // ---------- 5. 人間への依頼 ----------
   addRequests(list, { from, taskId = null, epicId = null, taskIds = null }) {
     const added = [];
@@ -1224,6 +1274,9 @@ class Orchestrator extends EventEmitter {
 }
 
 class Failure extends Error {}
+
+// codex の sandbox が原因らしい止まり方（worker が kind "sandbox" を付け忘れたときの拾い上げ）
+const SANDBOX_RE = /EPERM|Operation not permitted|sandbox|サンドボックス|実行制限|ローカル ?IPC|network (access )?(is )?(disabled|blocked|denied)|ネットワーク(接続|アクセス)?[^。\n]{0,12}(遮断|禁止|許可|できない)/i;
 
 // 依頼 r が task t を止めているか
 const blocks = (r, t) => r.blocking && r.status === 'open' && (r.taskIds || [r.taskId]).includes(t.id);

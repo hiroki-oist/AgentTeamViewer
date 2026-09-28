@@ -10,7 +10,7 @@ const risk = obj({ complexity: num, uncertainty: num, blast: num });
 // 人間への依頼。エージェントが自力では解決できないもの（インストール・認証・権限・判断）
 const option = obj({ label: str, description: str });
 const humanRequest = obj({
-  kind: { type: 'string', enum: ['install', 'auth', 'access', 'decision', 'other'] },
+  kind: { type: 'string', enum: ['install', 'auth', 'access', 'sandbox', 'decision', 'other'] },
   title: str,
   detail: str,
   blocking: { type: 'boolean' },
@@ -83,6 +83,9 @@ const SCHEMAS = {
   }),
 };
 
+// codex の sandbox の中で動く worker に、その制約と止まり方を伝える（止まれば orchestrator が別の runner に回す）
+const SANDBOX_RULE = (mode) => `SANDBOX: you run inside the Codex "${mode}" sandbox. Network access and local IPC (sockets or pipes to background services, e.g. a package manager daemon or a licensing client) are blocked, and writes outside this worktree fail. If a command fails because of this (EPERM, "Operation not permitted", cannot reach a registry or a local service), do not try to work around it: stop with status "blocked" and add one humanRequest with kind "sandbox", blocking=true, whose detail names the command that failed and the error. The orchestrator will rerun the task on a runner without this sandbox, keeping your partial changes.`;
+
 const LANG = 'Write every human-facing text field (titles, summaries, notes, request details) in Japanese.';
 
 // ボードは人との情報共有の場。人が一目で読む欄と、エージェント向けの詳しい欄を分ける
@@ -117,11 +120,11 @@ ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-function work({ goal, task, epic, context, previous, replies, critique, kind, guard, note }) {
+function work({ goal, task, epic, context, previous, replies, critique, kind, guard, note, sandbox }) {
   return `You are a worker agent in an autonomous team. Complete exactly one task in this git worktree (your current directory).
 
 YOUR ROLE (${kind.name}): ${kind.instructions}
-${kind.verify === 'artifacts' ? `Your output is checked by looking at the files you produce: save them in the writeSet (${kind.artifacts.join(', ')}).\n` : ''}${guard}
+${kind.verify === 'artifacts' ? `Your output is checked by looking at the files you produce: save them in the writeSet (${kind.artifacts.join(', ')}).\n` : ''}${sandbox ? `${SANDBOX_RULE(sandbox)}\n` : ''}${guard}
 
 PROJECT GOAL (context only): ${goal}
 EPIC: ${epic.id} ${epic.title}
@@ -284,7 +287,7 @@ Look for:
 
 Actions you may take (target = request id like "R3" or task id like "E5-T1"):
 - rewrite_request: replace a request's title (≤40 chars) and text (detail) so the person knows exactly what to do or decide and how to answer.
-- answer_request: close a request that needs no human (only kind "decision"/"other"; never install/auth/access). text = the answer the agent will get (what to do instead).
+- answer_request: close a request that needs no human (only kind "decision"/"other"; never install/auth/access/sandbox). text = the answer the agent will get (what to do instead).
 - nudge_task: attach a note that the task's next attempt will read (e.g. "update progress every 5 minutes; run the rendering with nohup and return waiting").
 - restart_task: stop a running task now and retry it with the note in text; its partial work is kept. Only for a task that is clearly stuck: ${rules.restart}.
 - rewrite_text: replace a task's headline (title field = "headline") or brief (title = "brief"), or an epic's brief, with plain text in text.
