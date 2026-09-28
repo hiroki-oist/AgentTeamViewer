@@ -1144,6 +1144,17 @@ class Orchestrator extends EventEmitter {
     r.status = dismiss ? 'dismissed' : 'resolved';
     r.reply = String(reply).slice(0, 2000);
     r.resolvedAt = new Date().toISOString();
+    // 人が判断に答えたのに、その task の今の試行は答えを知らない。止めて、答えを読んだ次の試行に切り替える（途中の変更は持ち込む）
+    if (r.kind === 'decision' && !String(r.reply).startsWith('（点検役が回答）')) {
+      for (const id of r.taskIds || [r.taskId]) {
+        const t = this.state.epics.flatMap((e) => e.tasks).find((x) => x.id === id);
+        if (t && t.status === 'running' && this.ctrlByAgent?.get(t.agent)) {
+          t.abortReason = `人の判断（${r.id}）を反映するためにやり直し`;
+          this.ctrlByAgent.get(t.agent).abort();
+          this.log('control', `${t.id}: ${r.id} への答えを反映するため、今の試行を止めて次の試行に切り替える`);
+        }
+      }
+    }
     this.log('request', `${r.id} を${dismiss ? '却下' : '対応済み'}に${r.reply ? `: ${oneLine(r.reply)}` : ''}`);
     // ブロッキングの依頼が全部片付いた task は再開
     for (const t of this.state.epics.flatMap((e) => e.tasks)) {
@@ -1177,6 +1188,14 @@ class Orchestrator extends EventEmitter {
     } else if (action === 'report') {
       this.writeReport(this.state.run.status !== 'done');
       return;
+    } else if (action === 'retask') {
+      // 人が task の今の試行を止め、注意書きを添えてやり直させる（途中の変更は持ち込む）
+      const t = this.state.epics.flatMap((e) => e.tasks).find((x) => x.id === arg.taskId);
+      if (!t) throw new Error(`task がない: ${arg.taskId}`);
+      if (arg.note) (t.notes ||= []).push(`人からの指示: ${String(arg.note).slice(0, 1000)}`);
+      if (t.status === 'running' && this.ctrlByAgent?.get(t.agent)) { t.abortReason = '人の指示でやり直し'; this.ctrlByAgent.get(t.agent).abort(); }
+      else if (['failed', 'blocked', 'waiting'].includes(t.status)) { t.status = 'todo'; t.wakeAt = null; }
+      this.log('control', `${t.id} を人の指示でやり直し${arg.note ? `: ${oneLine(arg.note, 100)}` : ''}`);
     } else if (action === 'protect-ok') {
       if (!run.protectHold) throw new Error('保護パスで止まっていない');
       run.protectHold = null;
