@@ -239,8 +239,11 @@ class Orchestrator extends EventEmitter {
         for (const a of n.attempts) if (a.result === 'running') { a.result = 'interrupted'; a.note = 'オーケストレータの再起動で中断'; }
         // 状態を保存する前に止まっていても、中断した試行のブランチが残っていれば持ち込む
         if (!n.carryBranch && n.status !== 'done' && n.attempts.length) {
-          const b = `atv/${this.runId}/task/${n.id}-a${n.attempts.length}`;
-          try { require('node:child_process').execFileSync('git', ['-C', this.repo.root, 'rev-parse', '--verify', '-q', b], { stdio: 'ignore' }); n.carryBranch = b; } catch { /* ない */ }
+          // 新しい試行から順にさかのぼり、残っているブランチを探す（途中で止まった試行はブランチを残さないことがある）
+          for (let k = n.attempts.length; k >= 1 && !n.carryBranch; k--) {
+            const b = `atv/${this.runId}/task/${n.id}-a${k}`;
+            try { require('node:child_process').execFileSync('git', ['-C', this.repo.root, 'rev-parse', '--verify', '-q', b], { stdio: 'ignore' }); n.carryBranch = b; } catch { /* ない */ }
+          }
         }
         if (['running', 'critique', 'review'].includes(n.status)) n.status = n.status === 'review' ? 'done' : 'todo';
         // 依頼なしで止まっていた task（旧版のバグ）は、そのまま続けさせる
