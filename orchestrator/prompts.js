@@ -42,7 +42,8 @@ const SCHEMAS = {
     tasks: { type: 'array', items: obj({ id: str, brief: str, headline: str }) },
   }),
   work: obj({
-    status: { type: 'string', enum: ['done', 'blocked', 'gave_up'] },
+    status: { type: 'string', enum: ['done', 'waiting', 'blocked', 'gave_up'] },
+    waitMinutes: num,
     headline: str,
     summary: str,
     humanRequests: { type: 'array', items: humanRequest },
@@ -113,7 +114,7 @@ Changes outside this list are rejected automatically and the attempt is counted 
 ${context ? `\nFinished work you can rely on:\n${context}\n` : ''}${previous ? `\nA previous attempt at this task failed. Evidence:\n${previous}\nFix the cause instead of repeating the same approach.\n` : ''}${replies ? `\nThe human answered earlier requests:\n${replies}\n` : ''}${critique ? `\nA critic reviewed the repeated failures of this task. Its diagnosis and guidance:\n${critique}\nFollow the guidance. If you find concrete evidence that it is wrong, do what the evidence says and explain it in summary.\n` : ''}
 PROGRESS (the person watching the board sees this): right after you understand the task, write .atv-progress.json in your current directory as {"steps": [{"title": "...", "done": false}, ...], "now": "..."} — 3 to 7 steps in plain Japanese (what, not how; no paths), and "now" = what you are doing at the moment in one short phrase. Rewrite the file whenever a step finishes or the plan changes (add, drop, or split steps as needed). If a step waits on a long job, say so in "now" with the expected time (e.g. 「学習の計測待ち（あと 10 分ほど）」). The file is never committed.
 Be economical: read only what you need, and run the smallest check that proves the task works. You do not need to commit; the orchestrator commits and merges for you.
-Finish with status "done" when the task is complete and verified, "blocked" if you need the human (see below), or "gave_up" if the task as written is impossible (explain why in summary).
+Finish with status "done" when the task is complete and verified; "waiting" if a job you started (training, rendering, a benchmark) must finish before you can go on — set waitMinutes to when it is worth checking again, and the orchestrator will resume the task then with your partial work kept (do not ask the human for this); "blocked" only if the human must do or decide something (see below; always with a concrete humanRequest); or "gave_up" if the task as written is impossible (explain why in summary). waitMinutes = 0 unless status is "waiting".
 headline: one plain sentence for the person watching the board — what is now possible or what is in the way (e.g. 「デモ 500 本を動作ごとに区切れるようになった」「Taketomi への同期はできたが、速度の計測がまだ」).
 summary: 1-3 sentences for later agents: what you did, where it is, and anything they must know (paths and names are fine here).
 ${HUMAN}

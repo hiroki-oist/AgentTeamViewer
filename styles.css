@@ -257,3 +257,4 @@ dialog .actions { display: flex; gap: 6px; justify-content: flex-end; margin-bot
   .column { max-height: 60vh; }
 }
 dialog details > summary:focus:not(:focus-visible) { outline: none; }
+.task .waiting { color: var(--ink-2); font-size: 11px; }

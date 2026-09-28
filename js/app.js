@@ -11,7 +11,7 @@
   let openEpic = null;
 
   const EFFORT_PIPS = { low: 1, medium: 2, high: 3, xhigh: 4, max: 4 };
-  const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔' };
+  const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔', waiting: '⏳' };
   const STATUS_LABEL = { ok: '✓ OK', warn: '▲ WARN', crit: '✕ CRIT' };
   const ALERT_ICON = { ok: '✓', warn: '▲', crit: '✕' };
   const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', 'protect-hold': '保護パスで停止', restarting: '再起動中', done: '完了', failed: '失敗' };
@@ -31,7 +31,7 @@
   const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : fmtK(n));
   const hhmm = (d) => d.toTimeString().slice(0, 5);
   const oneLine = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
-  const RESULT_LABEL = { ok: '成功', fail: '失敗', blocked: '人間待ち', interrupted: '中断', running: '実行中' };
+  const RESULT_LABEL = { ok: '成功', fail: '失敗', blocked: '人間待ち', interrupted: '中断', running: '実行中', waiting: 'ジョブ待ち', waited: 'ジョブ待ち' };
 
   // 予算の減り方: 1 分ごとの累計の記録のうち、直近 60 分の最初と今の差から（記録が 2 分未満なら出さない）
   function recentRate(w) {
@@ -256,7 +256,8 @@
           const escl = t.attempts.length > 1
             ? `<span class="esc">${t.attempts.map((a) => `<span class="${a.result === 'fail' ? 'fail' : ''}">${esc(a.model)}/${esc(a.effort)}</span>`).join(' → ')}</span>`
             : '';
-          const blocked = t.status === 'blocked' ? '<span class="wait">あなたへの依頼待ち</span>' : '';
+          const blocked = t.status === 'blocked' ? '<span class="wait">あなたへの依頼待ち</span>'
+            : t.status === 'waiting' ? `<span class="waiting" title="${esc(lastAttempt(t)?.headline || '')}">⏳ 自分のジョブの完了待ち（${t.wakeAt ? hhmm(new Date(t.wakeAt)) : '?'} に再開）</span>` : '';
           const lastCrit = t.critiques?.[t.critiques.length - 1];
           const crit = t.status === 'critique'
             ? `<span class="critic">⚔ 批判的レビュー中 ${chip(t.critic)}</span>`

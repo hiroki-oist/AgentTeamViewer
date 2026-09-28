@@ -515,9 +515,10 @@ class Orchestrator extends EventEmitter {
         prompt: prompts.report({ goal: this.cfg.goal, criteria: (this.state.project.successCriteria || []).map((c) => `- ${c}`).join('\n'), record: this.reportRecord(), usage, partial }),
       });
       this.state.agents[agent].state = 'finished';
-      if (!res.ok) { this.log('fail', `報告書の作成に失敗: ${oneLine(res.error)}`); return; }
+      const md = res.ok ? String(res.output?.markdown || '').trim() : '';
+      if (!md) { this.log('fail', `報告書の作成に失敗: ${oneLine(res.error || '本文が空')}`); return; }
       const file = path.join(this.repo.dir, 'report.md');
-      fs.writeFileSync(file, res.output.markdown.trim() + '\n');
+      fs.writeFileSync(file, md + '\n');
       run.report = { path: file, at: new Date().toISOString(), partial };
       this.log('report', `報告書を書いた: ${file}`);
     } finally { this.reporting = false; this.changed(); }
@@ -554,6 +555,10 @@ class Orchestrator extends EventEmitter {
     this.checkPlan();
     const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && !run.draining && this.activeCount() < w.limits.maxActiveAgents;
 
+    // 待ち時間が来た task を戻す
+    for (const t of this.state.epics.flatMap((e) => e.tasks)) {
+      if (t.status === 'waiting' && Date.now() >= Date.parse(t.wakeAt || 0)) { t.status = 'todo'; t.wakeAt = null; this.log('start', `${t.id}: 待ち時間が来たので再開`); }
+    }
     const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done').map((e) => e.id));
     const doneTasks = new Set(this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' || t.status === 'review').map((t) => t.id));
     const ready = (e, t) => this.taskReady(e, t, doneIds, doneTasks);
@@ -577,7 +582,7 @@ class Orchestrator extends EventEmitter {
 
     // 全体の状態（ループは止めない。依頼が解決されたり再開されたりしたら続きから動く）
     const busy = this.state.epics.some((e) => e.status === 'review' && e.review?.verdict === 'pending') ||
-      this.state.epics.some((e) => e.tasks.some((t) => t.status === 'running' || t.status === 'critique'));
+      this.state.epics.some((e) => e.tasks.some((t) => t.status === 'running' || t.status === 'critique' || t.status === 'waiting'));
     let next = 'running';
     if (this.state.epics.length && this.state.epics.every((e) => e.status === 'done')) next = 'done';
     else if (!busy) {
@@ -680,14 +685,30 @@ class Orchestrator extends EventEmitter {
       }
       const blocking = this.addRequests(out.humanRequests, { from: t.agent, taskId: t.id, epicId: e.id });
 
-      if (out.status === 'blocked' || blocking.length) {
-        // 途中の変更は捨てずにブランチに残し、次の試行で持ち込む
+      // 自分のジョブの完了待ち（依頼のない blocked も同じ扱い）: 人間には頼まず、時間が来たら自動で再開する
+      if (!blocking.length && (out.status === 'waiting' || out.status === 'blocked')) {
         if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
-        // blocked なのに依頼がないと、誰も何もできずに止まる。要約をそのまま依頼にする
+        const waits = t.attempts.filter((a) => a.result === 'waiting').length;
+        if (waits < this.cfg.maxWaits) {
+          const min = Math.min(120, Math.max(2, Number(out.waitMinutes) || 10));
+          finish('waiting', out.summary);
+          attempt.headline = out.headline || '';
+          t.status = 'waiting';
+          t.wakeAt = new Date(Date.now() + min * 60000).toISOString();
+          this.log('wait', `${t.id} は自分のジョブの完了待ち: ${out.headline || oneLine(out.summary)}（${hhmm(new Date(t.wakeAt))} に再開）`);
+          return;
+        }
+      }
+      if (out.status === 'blocked' || out.status === 'waiting' || blocking.length) {
+        // 途中の変更は捨てずにブランチに残し、次の試行で持ち込む
+        if (!t.carryBranch && (await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
+        // 待ちが続きすぎた（か依頼なしの blocked が続いた）ときだけ、判断を頼む。何を決めてほしいかを書く
         if (!blocking.length) {
-          blocking.push(...this.addRequests([{ kind: 'decision', blocking: true, title: `${t.id}「${t.title}」が止まった: ${out.headline || '理由を確認してほしい'}`,
-            detail: `${out.summary || '(要約なし)'}\n\n指示を返信すると、それを添えて再開します。「却下」なら別の進め方で再開します。${t.carryBranch ? `\n途中の変更はブランチ ${t.carryBranch} に残してあり、次の試行に持ち込みます。` : ''}` }],
+          const waits = t.attempts.filter((a) => a.result === 'waiting').length;
+          blocking.push(...this.addRequests([{ kind: 'decision', blocking: true, title: `${t.id}「${t.title}」の待ちが ${waits} 回続いている。続けるか決めてほしい`,
+            detail: `エージェントは自分で起動したジョブの完了を待っています: ${out.headline || oneLine(out.summary, 200)}\n\n決めてほしいこと: このまま待ち続けるか、やり方を変えるか。\n- 待たせるなら「続けて」と返信（また自動で待ちに戻ります）\n- やり方を変えるなら、その指示を返信\n- この task を諦めるなら「却下」\n\n詳細: ${out.summary || '(なし)'}${t.carryBranch ? `\n途中の変更はブランチ ${t.carryBranch} に残してあり、次の試行に持ち込みます。` : ''}` }],
           { from: t.agent, taskId: t.id, epicId: e.id }));
+          t.attempts.forEach((a) => { if (a.result === 'waiting') a.result = 'waited'; }); // 返答後は待ちの回数を数え直す
         }
         finish('blocked', out.summary);
         attempt.headline = out.headline || '';
