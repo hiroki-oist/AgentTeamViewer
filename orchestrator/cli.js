@@ -195,6 +195,7 @@ const cfg = {
   const stop = async () => {
     console.log('\n停止します（実行中のエージェントを中断し、worktree を片付け中）');
     await orch.shutdown();
+    orch.persistNow(); // 中断した task（と持ち込む途中の変更）の状態を残してから抜ける
     if (shared) await shared.off();
     process.exit(0);
   };
