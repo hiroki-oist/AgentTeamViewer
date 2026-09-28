@@ -32,7 +32,7 @@ description: いま開いている repo で、Agent Team Viewer のオーケス�
    - `--budget-usd 30` / `--budget-tokens 3000000`（90% で新規 spawn を停止）
    - プランの利用枠: `--plan-week-stop 0.9` / `--plan-5h-stop 0.95`（超えたら止めてリセット時刻に自動再開）、`--plan-week-share 0`（この run が週の枠を使ってよいポイント。0 で無効）。相談の前に `claude -p "ok" --model haiku --output-format stream-json --verbose` の `rate_limit_event` で今の使用率とリセット時刻を測って見せ、それを元に決める
    - `--per-call-usd 5`（claude 1 回あたりの上限）
-   - `--ladder claude`（`codex` / `mixed` も可。上の 3 で見つけた runner に合わせる）
+   - `--ladder auto`（既定。Codex がログイン済みなら Claude と混ぜる。画像生成の型 illustrator は Codex が要る）
    - `--max-agents 4`、`--max-attempts 4`、`--max-tasks 20`
    - `--critic-after 2`（2 回失敗した task に critic を立てて、原因と進め方を批判的に検証させる。0 で無効）
 6. **他の端末から見るか**: `tailscale status` が通る環境なら「ボードを tailnet 内の他の端末（別の PC やスマホ）からも見られるようにするか」を聞く。はいなら `--tailscale` を付ける（tailnet 内だけに公開し、インターネットには出さない。ボードには認証がないので、tailnet に他人の端末があるなら、その人も操作できることを伝える）
@@ -77,7 +77,9 @@ nohup atv --repo "$ROOT" --goal-file "$ROOT/.atv/goals/$RUN.md" --run-id "$RUN" 
 
 `api/state` から計画を要約して見せる。
 
-- 中プロジェクトごとに、依存関係、task の一覧（id、タイトル、writeSet、リスクから決まる初期のモデル / effort）
+- 中プロジェクトごとに、依存関係、task の一覧（id、**型**（`kind`）、タイトル、writeSet、リスクから決まる初期のモデル / effort）
+- root が新しく作った型（`state.kinds` の `origin: "run"`）があれば、その説明と道具。作らなかった型は依頼に出ている
+- 型に必要なものが足りずに止まっている task（`status: "blocked"`）と、その依頼
 - root が提案した完了条件と、検証コマンド（`run.checkCommand`）
 - `requests` にすでに依頼があれば、それも見せる
 
@@ -87,7 +89,9 @@ nohup atv --repo "$ROOT" --goal-file "$ROOT/.atv/goals/$RUN.md" --run-id "$RUN" 
 - **目標を直して立て直す** → 何を直すか聞き、goal ファイルを更新する。今の run を片付け（下の「停止と片付け」）、新しい runId で 4 からやり直す
 - **やめる** → 停止して片付ける
 
-計画の中身そのもの（task の分け方など）を直したい場合も「目標を直して立て直す」になる。goal ファイルに「こう分けてほしい」と書き足すと、root はそれに従う。
+計画の中身そのもの（task の分け方や型の選び方）を直したい場合も「目標を直して立て直す」になる。goal ファイルに「こう分けてほしい」「画像は illustrator で」と書き足すと、root はそれに従う。
+
+run が終わったら、root が作った型（`.atv/<runId>/kinds/*.md`）を、次からも使えるよう対象 repo の `.atv-kinds/` に保存するか聞く（保存はユーザーが了承したときだけ。repo にファイルが増えるため）。
 
 ## 6. 運用
 

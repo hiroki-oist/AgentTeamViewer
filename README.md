@@ -4,6 +4,7 @@
 
 - 失敗したら梯子を 1 段上げて再試行（adaptive inference budgeting）。最初から重いモデルは使わない
 - 同じ task が 2 回失敗したら **critic（批判的レビュー）** を立て、詰まっている根本原因・誤った前提・同じやり方の繰り返し・分析の浅さを疑わせる。その診断と指示を次の worker に渡す
+- 各 task には **型**（coder / tester / writer / researcher / blender / illustrator …）が付き、型ごとに役割の指示・道具・使うモデル・検証の方法が変わる。足りない型は root が作る
 - 各 task は git worktree で隔離し、宣言した `writeSet` の排他ロック・検証コマンド・レビューを通ったものだけを統合ブランチにマージ
 - エージェントが自力で解決できないこと（アプリのインストール、認証、権限、判断）は **「あなたへの依頼」** にまとまり、ボードから返答すると止まっていた task が返答つきで再開する
 
@@ -25,9 +26,8 @@ atv --repo ../my-project --goal "LIBERO-CTRL を実装して baseline 3 種を�
 # 検証コマンドと予算を指定
 atv --repo ../my-project --goal-file goal.md --check "pytest -q" --budget-usd 20
 
-# Codex だけ / Claude と Codex の混成
-atv --repo ../my-project --goal "..." --ladder codex
-atv --repo ../my-project --goal "..." --ladder mixed
+# 梯子は既定で auto（Codex がログイン済みなら Claude と混ぜる）。固定するなら
+atv --repo ../my-project --goal "..." --ladder claude   # codex / mixed も可
 
 # CLI を呼ばずに閉ループ全体を試す（トークン消費なし。git 操作は本物）
 atv --repo /tmp/sandbox-repo --goal "試し" --ladder mock
@@ -88,6 +88,32 @@ goal ─▶ root が計画（読み取り専用。epic / task / writeSet / risk 
 - 監視役が予算の 90% で新規 spawn を止める。claude には 1 回あたりの上限 `--max-budget-usd` も渡す
 - プランの利用枠（5 時間枠・週の枠）も見る。claude の stream-json が返す `rate_limit_event` の使用率をボードに出し、週の枠が `--plan-week-stop`（既定 90%）か 5 時間枠が `--plan-5h-stop`（既定 95%）を超えたら新規 spawn を止め、リセット時刻に自動で再開する。`--plan-week-share 0.3` のように、この run が週の枠を何ポイント使ってよいかも決められる。エージェントが動いていない間は `--plan-probe-min` 分ごとに haiku を 1 回呼んで確かめる。止まったときはボードの「枠を無視して続ける」（`{"action":"unhold"}`）で、その枠のリセットまで止めずに続けられる
 
+## エージェントの型
+
+型は「最初に持たせる道具の既定値」で、壁ではない。権限は 3 層に分けている。
+
+| 層 | 中身 |
+|---|---|
+| ① 共通の安全柵 | push・git remote・sudo・apt / brew install・ssh / scp・publish・gh は型に関係なく禁止（claude には `--disallowedTools`）。必要なら「あなたへの依頼」を通す |
+| ② 型の既定値 | 役割の指示、追加のツール、runner（`any` / `claude` / `codex`）、梯子の最低段、検証の方法、必要なコマンド |
+| ③ その場の拡張 | 権限で拒否された操作のうち ① に触れず、壊す・外と通信する系（rm, mv, curl, wget など）でもないものは、次の試行で自動で許可する |
+
+組み込みの型（`kinds/*.md`）:
+
+| 型 | 用途 | 検証 |
+|---|---|---|
+| coder | 実装・修正（既定） | 検証コマンド |
+| tester | テストを書いて壊しにいく | 検証コマンド |
+| writer | README・論文の節・設計メモ | レビューで読む |
+| researcher | 原因調査・分析。仮説と証拠を分けて報告 | レビューで読む |
+| blender | Blender を headless で使う 3D。プレビュー PNG を必ず出す | 成果物の存在 + レビューで画像を見る |
+| illustrator | Codex の画像生成で画像素材を作る（runner: codex） | 成果物の存在 + レビューで画像を見る |
+
+- 対象 repo に `.atv-kinds/<名前>.md` を置くと、プロジェクト固有の型を足したり、組み込みの型を上書きしたりできる（書式は `kinds/*.md` と同じ）
+- root は計画中に新しい型を提案できる。既存の型を土台にし、① に触れないものだけ自動で作り、`.atv/<runId>/kinds/` に保存する。① に触れる型は作らず、依頼に回す
+- 型に必要なもの（Codex、`blender` など）がない環境では、その型の task を止めて「用意してほしい」という依頼を 1 件にまとめて出す
+- critic は、型の選び間違いが失敗の原因だと判断したら、別の型に切り替えられる
+
 ## ボード
 
 1 画面に固定し、各パネルの中だけスクロールする（幅 1000px 未満では縦に積む）。
@@ -108,6 +134,8 @@ goal ─▶ root が計画（読み取り専用。epic / task / writeSet / risk 
 | `skill/atv-orchestrate/SKILL.md` | 対象 repo の Claude Code 用 skill。相談 → 起動 → 計画確認 → 運用 |
 | `orchestrator/orchestrator.js` | 閉ループ本体（計画 / スケジューラ / 試行 / 検証 / マージ / レビュー / 依頼） |
 | `orchestrator/runners.js` | `claude -p` / `codex exec` / mock のアダプタ。進行中のトークンと操作をストリームで拾う |
+| `orchestrator/kinds.js` | 型の読み込み・新しい型の作成・安全柵 |
+| `kinds/*.md` | 組み込みの型の定義 |
 | `orchestrator/prompts.js` | 各役割（root / worker / critic / reviewer）への指示と構造化出力の JSON Schema |
 | `orchestrator/git.js` | 統合ブランチと task ごとの worktree、直列マージ |
 | `orchestrator/server.js` | ボードの配信、`/api/events`（SSE）でのリアルタイム更新、操作 API |

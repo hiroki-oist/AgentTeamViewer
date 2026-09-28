@@ -181,7 +181,7 @@
           const act = (t.status === 'running' || t.status === 'critique') && t.activity ? `<span class="activity" title="${esc(t.activity)}">${esc(t.activity)}</span>` : '';
           return `<li class="task ${t.status}">
               <span class="st" title="${t.status}">${TASK_ICON[t.status] || '○'}</span>
-              <span class="t-title" title="${esc(t.title)}">${esc(t.id)} ${esc(t.title)}</span>
+              <span class="t-title" title="${esc(t.title)}">${t.kind ? `<span class="kind" title="${esc(state.kinds?.[t.kind]?.description || t.kind)}">${esc(t.kind)}</span>` : ''}${esc(t.id)} ${esc(t.title)}</span>
               <span class="t-sub">${chip(t.agent)}${files}${waits}${blocked}${escl}${crit}</span>
               ${act}
             </li>`;
@@ -267,8 +267,8 @@
     openEpic = epicId;
     const r = route(e.risk);
     const rows = e.tasks.map((t) => `<tr>
-        <td>${esc(t.id)}</td>
-        <td>${esc(t.title)}${t.description ? `<div class="desc">${esc(t.description)}</div>` : ''}${t.summary ? `<div class="desc">→ ${esc(t.summary)}</div>` : ''}</td>
+        <td>${esc(t.id)}${t.kind ? `<br><span class="kind">${esc(t.kind)}</span>` : ''}</td>
+        <td>${esc(t.title)}${t.grants?.length ? `<div class="desc">追加で許可: ${esc(t.grants.join(', '))}</div>` : ''}${t.description ? `<div class="desc">${esc(t.description)}</div>` : ''}${t.summary ? `<div class="desc">→ ${esc(t.summary)}</div>` : ''}</td>
         <td>${t.status}${t.status === 'failed' && live ? `<br><button class="btn" data-retry="${esc(t.id)}">再試行</button>` : ''}</td><td>${chip(t.agent)}</td>
         <td>${t.writeSet.map((f) => `<span class="file">${esc(f)}</span>`).join(' ') || '<span class="muted">読み取りのみ</span>'}</td>
         <td>${t.attempts.map((a) => `${esc(a.model)}/${esc(a.effort)}: ${a.result}${a.note ? ` <span class="muted">(${esc(a.note.slice(0, 400))})</span>` : ''}`).join('<br>') || '—'}

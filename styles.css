@@ -167,6 +167,7 @@ h2 { font-size: 13px; color: var(--ink-2); display: flex; gap: 8px; align-items:
 .task.blocked .st { color: var(--warning); }
 .activity { grid-column: 2; font-size: 11px; color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .activity::before { content: "› "; }
+.kind { display: inline-block; font-size: 10px; line-height: 1.5; padding: 0 5px; margin-right: 5px; border-radius: 3px; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border); vertical-align: 1px; }
 .task.critique .st { color: var(--serious); }
 .critic { font-size: 10.5px; color: var(--serious); display: inline-flex; gap: 4px; align-items: center; }
 dialog .critique { margin-top: 6px; padding: 4px 8px; border-left: 2px solid var(--serious); font-size: 11.5px; display: flex; flex-direction: column; gap: 2px; }

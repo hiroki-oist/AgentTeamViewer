@@ -33,8 +33,10 @@ ATV.policy = (() => {
     return Math.round((six * (n - 1)) / 5);
   }
 
-  function route(risk, failures = 0, ladder = LADDERS.claude) {
-    const i = baseIndex(riskScore(risk), ladder.length);
+  // floor: 型ごとの最低段（6 段の梯子を基準にした段数。短い梯子では比率で合わせる）
+  function route(risk, failures = 0, ladder = LADDERS.claude, floor = 0) {
+    const min = Math.round((floor * (ladder.length - 1)) / 5);
+    const i = Math.max(baseIndex(riskScore(risk), ladder.length), min);
     return ladder[Math.min(i + failures, ladder.length - 1)];
   }
 

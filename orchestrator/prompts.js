@@ -24,8 +24,12 @@ const SCHEMAS = {
       type: 'array',
       items: obj({
         id: str, title: str, dependsOn: strs, risk,
-        tasks: { type: 'array', items: obj({ id: str, title: str, description: str, writeSet: strs, risk }) },
+        tasks: { type: 'array', items: obj({ id: str, title: str, description: str, kind: str, writeSet: strs, risk }) },
       }),
+    },
+    newKinds: {
+      type: 'array',
+      items: obj({ name: str, basedOn: str, description: str, instructions: str, tools: strs, requires: strs }),
     },
     humanRequests: { type: 'array', items: humanRequest },
   }),
@@ -40,7 +44,7 @@ const SCHEMAS = {
     flawedAssumptions: strs,
     unansweredQuestions: strs,
     guidance: str,
-    revisedTask: obj({ title: str, description: str, writeSet: strs }),
+    revisedTask: obj({ title: str, description: str, kind: str, writeSet: strs }),
     humanRequests: { type: 'array', items: humanRequest },
   }),
   review: obj({
@@ -55,7 +59,7 @@ const LANG = 'Write every human-facing text field (titles, summaries, notes, req
 
 const REQUESTS_RULE = `If you are blocked by something only the human can do (install an app or system package, log in / grant an API key or OAuth, grant access to a resource, make a product decision), do NOT work around it silently: add an entry to humanRequests with concrete steps for the human (exact command, URL, env var name). Set blocking=true only if you cannot finish without it. Never ask for secrets to be pasted into the chat; ask the human to put them in an env var or a local file and tell you the name.`;
 
-function plan({ goal, checkCommand, maxTasks }) {
+function plan({ goal, checkCommand, maxTasks, catalog }) {
   return `You are the root orchestrator of an autonomous agent team. You do not write code. Your job is to turn the goal below into a dependency-aware task graph that cheap worker agents can execute in parallel.
 
 GOAL:
@@ -67,17 +71,23 @@ Rules:
 - epics = mid-sized units of work, each ending with a review. tasks = one worker agent each, small enough to finish in one session.
 - Keep the graph small: at most ${maxTasks} tasks total. Fewer, well-scoped tasks waste fewer tokens than many tiny ones.
 - ids: epics "E1", "E2", …; tasks "<epicId>-T1", "<epicId>-T2", …. dependsOn lists epic ids only, no cycles.
-- writeSet: every repo-relative path the task may create or modify. A path ending in "/" means the whole directory. Tasks that run in parallel should not overlap; overlapping tasks will be serialized by file locks. Use [] for read-only investigation tasks.
+- writeSet: every repo-relative path the task may create or modify. A path ending in "/" means the whole directory. Tasks that run in parallel should not overlap; overlapping tasks will be serialized by file locks. Use [] for read-only investigation tasks. For types that produce files to be looked at (illustrator, blender, …), give a directory (e.g. "assets/icons/") so they can save side files such as prompts or preview renders next to the result.
 - description: what "done" means, precisely, including how to verify it. Workers only see their own task, the goal, and short summaries of finished tasks.
 - risk (0..1 each): complexity, uncertainty (how likely the first attempt is wrong), blast (how much breaks if it is wrong). This decides which model runs the task: be honest, low risk means a cheap model.
 - checkCommand: one shell command that verifies the repo (tests/lint), run in a fresh checkout after every task. ${checkCommand ? `The human already chose: ${JSON.stringify(checkCommand)} — return it unchanged.` : 'Use "" if there is nothing reliable to run.'}
 - successCriteria: 2-4 measurable criteria for the whole goal.
+- kind: the agent type that runs each task. Pick from this catalog (types marked UNAVAILABLE can still be chosen if the goal needs them; the human will be asked to install what is missing):
+${catalog}
+- newKinds: only if no type in the catalog fits a recurring kind of work (e.g. "video-editor" using ffmpeg). basedOn = the closest existing type; instructions = how this role should work and verify its output; tools = extra Claude tool permissions such as "Bash(ffmpeg:*)"; requires = commands that must be installed. Use [] if the catalog is enough (it usually is). Tasks may use a new kind's name.
 ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-function work({ goal, task, epic, context, previous, replies, critique }) {
+function work({ goal, task, epic, context, previous, replies, critique, kind, guard }) {
   return `You are a worker agent in an autonomous team. Complete exactly one task in this git worktree (your current directory).
+
+YOUR ROLE (${kind.name}): ${kind.instructions}
+${kind.verify === 'artifacts' ? `Your output is checked by looking at the files you produce: save them in the writeSet (${kind.artifacts.join(', ')}).\n` : ''}${guard}
 
 PROJECT GOAL (context only): ${goal}
 EPIC: ${epic.id} ${epic.title}
@@ -94,7 +104,7 @@ ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-function critique({ goal, task, epic, attempts, context, earlier }) {
+function critique({ goal, task, epic, attempts, context, earlier, kinds }) {
   return `You are an adversarial critic in an autonomous agent team. One task has failed repeatedly, and the team keeps escalating to heavier models. Your job is NOT to do the task. Your job is to find out why it keeps failing, and to challenge the approach, the assumptions, and the depth of analysis. Be skeptical, specific, and evidence-based. You may read the repository (this checkout has all accepted work merged; the failed attempts are NOT in it — their diffs are below).
 
 PROJECT GOAL: ${goal}
@@ -106,6 +116,8 @@ ${context ? `\nFinished work in the project:\n${context}\n` : ''}
 ATTEMPTS SO FAR (oldest first):
 ${attempts}
 ${earlier ? `\nYour earlier critique of this task (it did not help enough — go deeper, do not repeat it):\n${earlier}\n` : ''}
+The task is run by agent type "${task.kind}". If a different type (or a tool the agent lacked) is what is really missing, say so: in revisedTask.kind you may switch it to one of: ${kinds}.
+
 Look for:
 - the root cause behind the symptoms (not the last error message), and whether each attempt attacked the root cause or a symptom
 - the same approach being repeated with a heavier model, instead of a different approach
@@ -117,13 +129,13 @@ verdict:
 - "change_approach": the task is fine, but the next attempt must work differently. guidance = concrete instructions for the next worker (what to check first, what to try, what to stop doing).
 - "task_is_wrong": the task definition itself causes the failures (wrong scope, wrong writeSet, impossible "done" condition). revisedTask = the corrected task (keep writeSet minimal; repo-relative, "/" suffix for directories). guidance = how to do the revised task.
 - "needs_human": only the human can unblock it (missing credentials/hardware/data, an unclear requirement). Put the concrete ask in humanRequests with blocking=true.
-For verdicts other than "task_is_wrong", return revisedTask with empty strings and [].
+For verdicts other than "task_is_wrong", return revisedTask with empty strings and []. revisedTask.kind = "" keeps the current type.
 diagnosis: 2-4 sentences. flawedAssumptions / unansweredQuestions: short items, [] if none.
 ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-function review({ goal, epic, diff, checkCommand }) {
+function review({ goal, epic, diff, checkCommand, artifacts }) {
   return `You are the reviewer for one epic of an autonomous agent team. The worker agents' changes are already merged into this checkout (read-only for you).
 
 PROJECT GOAL: ${goal}
@@ -132,7 +144,7 @@ TASKS:
 ${epic.tasks.map((t) => `- ${t.id} ${t.title}: ${t.summary || '(no summary)'}`).join('\n')}
 ${checkCommand ? `The check command ${JSON.stringify(checkCommand)} already passed after each task.` : 'There is no automatic check command; verify by reading the code.'}
 
-DIFF (stat):
+${artifacts.length ? `Some tasks produced files that must be judged by looking at them (images, renders, documents). Open each with the Read tool before deciding:\n${artifacts.map((a) => `- ${a}`).join('\n')}\n\n` : ''}DIFF (stat):
 ${diff.stat || '(empty)'}
 
 DIFF:

@@ -50,7 +50,10 @@ async function claude(opts, cfg) {
   if (opts.readOnly) args.push('--permission-mode', 'dontAsk', '--allowedTools', 'Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(ls:*)');
   else {
     args.push('--permission-mode', cfg.claudePermissionMode);
-    if (cfg.workerTools) args.push('--allowedTools', cfg.workerTools);
+    // ② 型のツール + ③ その場で許可したもの。① の安全柵は disallowed で常に上書きする
+    const allowed = [...new Set([...(cfg.workerTools ? cfg.workerTools.split(',') : []), ...(opts.tools || [])].map((x) => x.trim()).filter(Boolean))];
+    if (allowed.length) args.push('--allowedTools', allowed.join(','));
+    if (opts.disallowed?.length) args.push('--disallowedTools', opts.disallowed.join(','));
   }
   if (opts.maxBudgetUsd > 0) args.push('--max-budget-usd', opts.maxBudgetUsd.toFixed(2));
 
@@ -77,10 +80,11 @@ async function claude(opts, cfg) {
   const tokens = Object.values(final.modelUsage || {}).reduce((a, m) => a + (m.inputTokens || 0) + (m.outputTokens || 0) + (m.cacheCreationInputTokens || 0), 0) || sum(perMessage);
   const costUsd = final.total_cost_usd || 0;
   // 権限で拒否された操作は、次の試行の証拠として残す
-  const denied = (final.permission_denials || []).map((d) => `${d.tool_name} ${oneLine(d.tool_input?.command || d.tool_input?.file_path || '', 60)}`);
+  const denials = (final.permission_denials || []).map((d) => ({ tool: d.tool_name, command: d.tool_input?.command || d.tool_input?.file_path || '' }));
+  const denied = denials.map((d) => `${d.tool} ${oneLine(d.command, 60)}`);
   if (denied.length && final.structured_output) final.structured_output.summary = `${final.structured_output.summary}（権限で拒否: ${denied.slice(0, 3).join(' / ')}）`;
-  if (final.is_error || !final.structured_output) return { ok: false, tokens, costUsd, error: `claude: ${final.subtype} ${oneLine(final.result, 300)}` };
-  return { ok: true, output: final.structured_output, tokens, costUsd };
+  if (final.is_error || !final.structured_output) return { ok: false, tokens, costUsd, denials, error: `claude: ${final.subtype} ${oneLine(final.result, 300)}` };
+  return { ok: true, output: final.structured_output, tokens, costUsd, denials };
 }
 
 const sum = (m) => [...m.values()].reduce((a, b) => a + b, 0);
@@ -172,8 +176,9 @@ async function mock(opts) {
   }
   // worker: writeSet の中に実際にファイルを書く（git のマージまで本物で通す）
   const t = opts.task;
+  const ext = opts.kind?.verify === 'artifacts' ? opts.kind.artifacts[0] : 'txt';
   for (const p of t.writeSet) {
-    const file = p.endsWith('/') ? path.join(p, `${t.id}.txt`) : p;
+    const file = p.endsWith('/') ? path.join(p, `${t.id}.${ext}`) : p;
     fs.mkdirSync(path.dirname(path.join(opts.cwd, file)), { recursive: true });
     fs.appendFileSync(path.join(opts.cwd, file), `${t.id} attempt by ${opts.model}/${opts.effort}\n`);
   }
@@ -196,16 +201,23 @@ const MOCK_PLAN = {
   checkCommand: '',
   epics: [
     { id: 'E1', title: '土台づくり', dependsOn: [], risk: MOCK_RISK(0.2, 0.2, 0.3), tasks: [
-      { id: 'E1-T1', title: '設定ファイル', description: 'config を作る', writeSet: ['config/'], risk: MOCK_RISK(0.1, 0.1, 0.2) },
+      { id: 'E1-T1', title: '設定ファイル', description: 'config を作る', kind: 'coder', writeSet: ['config/'], risk: MOCK_RISK(0.1, 0.1, 0.2) },
       { id: 'E1-T2', title: 'ユーティリティ', description: 'utils を作る', writeSet: ['src/utils.txt'], risk: MOCK_RISK(0.3, 0.2, 0.2) },
     ] },
     { id: 'E2', title: 'コア機能', dependsOn: ['E1'], risk: MOCK_RISK(0.7, 0.6, 0.6), tasks: [
       { id: 'E2-T1', title: '外部 API クライアント', description: 'API を叩く', writeSet: ['src/api/'], risk: MOCK_RISK(0.6, 0.6, 0.5) },
       { id: 'E2-T2', title: 'コアロジック', description: '本体', writeSet: ['src/core.txt', 'src/api/'], risk: MOCK_RISK(0.8, 0.7, 0.7) },
     ] },
-    { id: 'E3', title: 'ドキュメント', dependsOn: ['E1'], risk: MOCK_RISK(0.1, 0.1, 0.1), tasks: [
-      { id: 'E3-T1', title: 'README', description: 'README を書く', writeSet: ['docs/'], risk: MOCK_RISK(0.1, 0.1, 0.1) },
+    { id: 'E3', title: 'ドキュメントと素材', dependsOn: ['E1'], risk: MOCK_RISK(0.1, 0.1, 0.1), tasks: [
+      { id: 'E3-T1', title: 'README', description: 'README を書く', kind: 'writer', writeSet: ['docs/'], risk: MOCK_RISK(0.1, 0.1, 0.1) },
+      { id: 'E3-T2', title: 'アイコン画像', description: 'アプリのアイコンを作る', kind: 'illustrator', writeSet: ['assets/icons/'], risk: MOCK_RISK(0.2, 0.3, 0.1) },
+      { id: 'E3-T3', title: 'ロゴの 3D レンダー', description: 'ロゴを 3D にしてレンダリング', kind: 'blender', writeSet: ['assets/3d/'], risk: MOCK_RISK(0.4, 0.4, 0.1) },
+      { id: 'E3-T4', title: 'デモ動画の書き出し', description: 'スクリーン録画を mp4 にまとめる', kind: 'video-editor', writeSet: ['assets/video/'], risk: MOCK_RISK(0.2, 0.2, 0.1) },
     ] },
+  ],
+  newKinds: [
+    { name: 'video-editor', basedOn: 'coder', description: '動画の編集・書き出し（ffmpeg）', instructions: 'ffmpeg で編集し、書き出した動画のサムネイル PNG も保存する', tools: ['Bash(ffmpeg:*)'], requires: ['ffmpeg'] },
+    { name: 'releaser', basedOn: 'coder', description: 'リリース作業', instructions: 'タグを打って push する', tools: ['Bash(git push:*)'], requires: [] },
   ],
   humanRequests: [{ kind: 'decision', title: 'ライセンスを決めてほしい', detail: 'MIT / Apache-2.0 のどちらにするか返信してください', blocking: false }],
 };

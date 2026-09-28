@@ -14,6 +14,7 @@ const watchdog = require('../js/watchdog.js');
 const runners = require('./runners.js');
 const { Repo, covered } = require('./git.js');
 const { SCHEMAS, prompts } = require('./prompts.js');
+const { Kinds, GUARD, NO_AUTO_GRANT, guarded } = require('./kinds.js');
 
 const hhmm = (d = new Date()) => d.toTimeString().slice(0, 5);
 const clamp01 = (x) => Math.min(1, Math.max(0, Number(x) || 0));
@@ -151,6 +152,8 @@ class Orchestrator extends EventEmitter {
     this.on('change', () => this.persistSoon());
     if (dirty) this.log('warn', '元の作業ツリーに未コミットの変更あり。統合ブランチは HEAD から切るので、それらは含まれない');
     this.log('start', `統合ブランチ ${this.repo.mainBranch} を作成（${this.repo.mainPath}）`);
+    this.kinds = new Kinds({ repoRoot: this.repo.root, runDir: this.repo.dir, available: this.cfg.available || { claude: true, codex: false } });
+    this.state.kinds = this.kinds.summary();
 
     this.minuteTimer = setInterval(() => { const b = this.state.watchdog.burn; b.push(0); b.shift(); this.changed(); }, 60000);
     this.tickTimer = setInterval(() => this.schedule(), 1000);
@@ -219,7 +222,7 @@ class Orchestrator extends EventEmitter {
     this.log('plan', `root (${route.model}/${route.effort}) が計画を作成中`);
     const res = await this.runAgent(root, {
       role: 'planner', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.plan,
-      prompt: prompts.plan({ goal: this.cfg.goal, checkCommand: this.cfg.check, maxTasks: this.cfg.maxTasks }),
+      prompt: prompts.plan({ goal: this.cfg.goal, checkCommand: this.cfg.check, maxTasks: this.cfg.maxTasks, catalog: this.kinds.catalog() }),
     });
     if (!res.ok) {
       this.state.run.status = 'failed';
@@ -231,11 +234,43 @@ class Orchestrator extends EventEmitter {
     this.state.project.name = p.name || this.state.project.name;
     this.state.project.successCriteria = p.successCriteria || [];
     if (!this.cfg.check && p.checkCommand) this.state.run.checkCommand = p.checkCommand;
+    this.fallbackKind = {};
+    for (const spec of p.newKinds || []) this.createKind(spec, root);
     this.state.epics = this.validatePlan(p.epics || []);
     for (const e of this.state.epics) e.lead = root;
+    this.requestMissingKinds(root);
     const n = this.state.epics.reduce((s, e) => s + e.tasks.length, 0);
     this.state.run.status = 'running';
     this.log('plan', `計画完了: 中プロジェクト ${this.state.epics.length} 件 / task ${n} 件。検証コマンド: ${this.state.run.checkCommand || '(なし)'}`);
+  }
+
+  // root が提案した新しい型を作る。安全柵に触れるなら作らず、土台の型で代用して依頼に残す
+  createKind(spec, from) {
+    const r = this.kinds.create(spec);
+    if (r.kind) {
+      this.log('plan', `新しい型「${r.kind.name}」を作成（土台: ${spec.basedOn || 'coder'}）: ${r.kind.description}`);
+    } else {
+      this.fallbackKind[String(spec.name).toLowerCase()] = String(spec.basedOn || 'coder').toLowerCase();
+      this.log('warn', `型「${spec.name}」は作らなかった: ${r.error}`);
+      this.addRequests([{ kind: 'decision', blocking: false, title: `型「${spec.name}」を作るか判断してほしい`,
+        detail: `${r.error}\n提案内容: ${spec.description}\n必要なら対象 repo の .atv-kinds/${spec.name}.md に定義を置いて起動し直してください（いまは ${spec.basedOn || 'coder'} で代用）。` }], { from });
+    }
+    this.state.kinds = this.kinds.summary();
+  }
+
+  // 使う型に足りないもの（runner・コマンド）があれば、その task を止めて 1 件の依頼にまとめる
+  requestMissingKinds(from) {
+    const byKind = new Map();
+    for (const e of this.state.epics) for (const t of e.tasks) {
+      const miss = this.kinds.missing(this.kinds.get(t.kind));
+      if (miss.length) (byKind.get(t.kind) || byKind.set(t.kind, { miss, tasks: [] }).get(t.kind)).tasks.push(t);
+    }
+    for (const [name, { miss, tasks }] of byKind) {
+      const req = this.addRequests([{ kind: 'install', blocking: true, title: `型「${name}」に必要な ${miss.join(', ')} を用意してほしい`,
+        detail: `${tasks.map((t) => t.id).join(', ')} は ${miss.join(', ')} がないと動かせません。${miss.includes('codex') ? 'Codex CLI を入れて `codex login` してください。' : `\`${miss.join('`, `')}\` を PATH に入れてください。`}用意できたら「対応済み」、この task を諦めるなら「却下」を押してください。` }],
+      { from, taskIds: tasks.map((t) => t.id) });
+      for (const t of tasks) { t.status = 'blocked'; t.blockedBy = req[0]?.id; }
+    }
   }
 
   validatePlan(epics) {
@@ -264,12 +299,26 @@ class Orchestrator extends EventEmitter {
     return out;
   }
 
+  // 型名を解決する（作れなかった型は土台の型、知らない型は coder）
+  kindName(name) {
+    const n = String(name || 'coder').toLowerCase();
+    return this.kinds?.map.has(n) ? n : this.fallbackKind?.[n] && this.kinds.map.has(this.fallbackKind[n]) ? this.fallbackKind[n] : 'coder';
+  }
+
+  // 型が runner を指定していればその梯子を使う（mock はすべて mock）
+  ladderFor(kind) {
+    if (this.cfg.ladder === 'mock' || kind.runner === 'any') return this.ladder;
+    const own = this.ladder.filter((r) => r.runner === kind.runner);
+    return own.length >= 3 ? own : policy.LADDERS[kind.runner];
+  }
+
   newTask(t, epic) {
     return {
       id: String(t.id), title: t.title, description: t.description || '', status: 'todo', agent: null,
+      kind: this.kindName(t.kind),
       writeSet: [...new Set((t.writeSet || []).map(normPath).filter(Boolean))],
       risk: t.risk ? normRisk(t.risk) : normRisk(epic.risk),
-      tokens: 0, costUsd: 0, attempts: [], summary: '', activity: null,
+      tokens: 0, costUsd: 0, attempts: [], summary: '', activity: null, grants: [],
     };
   }
 
@@ -348,14 +397,15 @@ class Orchestrator extends EventEmitter {
 
   async attemptTask(e, t) {
     const failures = t.attempts.filter((a) => a.result === 'fail').length;
-    const route = policy.route(t.risk, failures, this.ladder);
+    const kind = this.kinds.get(t.kind);
+    const route = policy.route(t.risk, failures, this.ladderFor(kind), kind.floor);
     if (!t.agent) t.agent = this.newAgent('worker', route);
     Object.assign(this.state.agents[t.agent], { runner: route.runner, model: route.model, effort: route.effort });
     const attempt = { model: route.model, effort: route.effort, runner: route.runner, result: 'running', startedAt: new Date().toISOString(), tokens: 0 };
     t.attempts.push(attempt);
     t.status = 'running'; // 同期的に running にしてロックを確保する
     this.state.agents[t.agent].state = 'active';
-    this.log(failures ? 'escalate' : 'lock', `${t.id} 開始 ${route.model}/${route.effort}${failures ? `（${failures} 回失敗後に昇格）` : ''}。ロック: ${t.writeSet.join(', ') || '(なし)'}`);
+    this.log(failures ? 'escalate' : 'lock', `${t.id} [${kind.name}] 開始 ${route.model}/${route.effort}${failures ? `（${failures} 回失敗後に昇格）` : ''}。ロック: ${t.writeSet.join(', ') || '(なし)'}`);
 
     let wt = null;
     let needCritic = false;
@@ -368,15 +418,24 @@ class Orchestrator extends EventEmitter {
     try {
       wt = await this.repo.createTaskWorktree(t.id, t.attempts.length);
       const res = await this.runAgent(t.agent, {
-        role: 'worker', cwd: wt.path, schema: SCHEMAS.work, task: t,
+        role: 'worker', cwd: wt.path, schema: SCHEMAS.work, task: t, kind,
+        tools: [...kind.tools, ...t.grants], disallowed: GUARD.claudeDisallowed,
         replies: this.repliesFor(t.id),
         critique: this.critiqueFor(t),
-        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t) }),
+        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: GUARD.text }),
         onActivity: (text) => { t.activity = text; },
       }, (d) => { t.tokens += d; attempt.tokens += d; });
+      const granted = this.grantFromDenials(t, res.denials);
       if (!res.ok) throw new Failure(res.error);
       t.costUsd += res.costUsd || 0;
       const out = res.output;
+
+      // 権限が足りずに止まっただけなら、③ で広げて人間を煩わせずにやり直す
+      if (out.status === 'blocked' && granted.length && (out.humanRequests || []).every((r) => r.kind === 'access')) {
+        finish('blocked', `権限不足 → ${granted.join(', ')} を許可して再試行`);
+        t.status = 'todo';
+        return;
+      }
       const blocking = this.addRequests(out.humanRequests, { from: t.agent, taskId: t.id, epicId: e.id });
 
       if (out.status === 'blocked' || blocking.length) {
@@ -391,8 +450,11 @@ class Orchestrator extends EventEmitter {
       const outside = changed.filter((f) => !covered(f, t.writeSet));
       if (outside.length) throw new Failure(`writeSet 外を変更: ${outside.slice(0, 5).join(', ')}`);
       if (!changed.length && t.writeSet.length) throw new Failure(`変更がない（summary: ${out.summary}）`);
+      // 型ごとの検証: check = 検証コマンド / artifacts = 成果物ファイルがあること（中身はレビューで見る）/ review = レビューだけ
+      const made = changed.filter((f) => kind.artifacts.includes(path.extname(f).slice(1).toLowerCase()));
+      if (kind.verify === 'artifacts' && !made.length) throw new Failure(`成果物（${kind.artifacts.join(', ')}）がない。変更: ${changed.slice(0, 5).join(', ')}`);
 
-      const check = this.state.run.checkCommand;
+      const check = kind.verify === 'check' ? this.state.run.checkCommand : '';
       if (check && changed.length) {
         t.activity = `検証中: ${check}`;
         this.changed();
@@ -403,6 +465,8 @@ class Orchestrator extends EventEmitter {
 
       finish('ok');
       t.summary = out.summary;
+      t.changed = changed;
+      t.artifacts = made;
       t.status = 'done';
       this.state.agents[t.agent].state = 'finished';
       this.log('done', `${t.id} 完了（${changed.length} ファイル）。ロック解放。${oneLine(out.summary)}`);
@@ -443,7 +507,7 @@ class Orchestrator extends EventEmitter {
     try {
       res = await this.runAgent(critic, {
         role: 'critic', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.critique, task: t,
-        prompt: prompts.critique({ goal: this.cfg.goal, task: t, epic: e, attempts, context: this.contextSummary(t), earlier }),
+        prompt: prompts.critique({ goal: this.cfg.goal, task: t, epic: e, attempts, context: this.contextSummary(t), earlier, kinds: [...this.kinds.map.keys()].join(', ') }),
         onActivity: (text) => { t.activity = `critic: ${text}`; },
       }, (d) => { t.tokens += d; });
     } catch (err) {
@@ -475,9 +539,13 @@ class Orchestrator extends EventEmitter {
           t.title = r.title || t.title;
           t.description = r.description;
           t.writeSet = [...new Set((r.writeSet || []).map(normPath).filter(Boolean))];
-          this.log('critic', `${t.id} を定義し直し: ${t.title}（writeSet ${before || '(なし)'} → ${t.writeSet.join(', ') || '(なし)'}）`);
+          if (r.kind) t.kind = this.kindName(r.kind);
+          this.log('critic', `${t.id} を定義し直し: ${t.title} [${t.kind}]（writeSet ${before || '(なし)'} → ${t.writeSet.join(', ') || '(なし)'}）`);
+        } else if (r?.kind && this.kindName(r.kind) !== t.kind) {
+          t.kind = this.kindName(r.kind);
+          this.log('critic', `${t.id} の型を ${t.kind} に変更`);
         }
-        t.status = this.state.requests.some((x) => x.taskId === t.id && x.blocking && x.status === 'open') ? 'blocked' : 'todo';
+        t.status = this.state.requests.some((x) => blocks(x, t)) ? 'blocked' : 'todo';
       }
     }
     this.changed();
@@ -490,6 +558,25 @@ class Orchestrator extends EventEmitter {
     if (!c) return '';
     return [`diagnosis: ${c.diagnosis}`, c.flawedAssumptions?.length && `flawed assumptions: ${c.flawedAssumptions.join(' / ')}`,
       c.unansweredQuestions?.length && `questions to answer first: ${c.unansweredQuestions.join(' / ')}`, `guidance: ${c.guidance}`].filter(Boolean).join('\n');
+  }
+
+  // ③ その場の拡張: 権限で拒否された操作のうち、安全柵に触れないものを次の試行で許可する
+  grantFromDenials(t, denials = []) {
+    const add = [];
+    for (const d of denials) {
+      let rule = null;
+      if (d.tool === 'Bash') {
+        const cmd = String(d.command || '').trim();
+        const head = cmd.split(/\s+/)[0];
+        if (head && !guarded(cmd) && !NO_AUTO_GRANT.includes(head) && !/[;&|`$<>\/]/.test(head)) rule = `Bash(${head}:*)`;
+      } else if (!['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read'].includes(d.tool)) rule = d.tool; // ファイル系の拒否は worktree 外への操作なので広げない
+      if (rule && !t.grants.includes(rule) && !add.includes(rule) && !GUARD.claudeDisallowed.includes(rule)) add.push(rule);
+    }
+    if (add.length) {
+      t.grants.push(...add);
+      this.log('control', `${t.id}: 権限で拒否された操作を次の試行から許可: ${add.join(', ')}`);
+    }
+    return add;
   }
 
   // 後続 task に渡す共有メモリ。完了 task の要約だけ（トークン節約のため 1 行ずつ）
@@ -506,7 +593,7 @@ class Orchestrator extends EventEmitter {
   }
 
   repliesFor(taskId) {
-    return this.state.requests.filter((r) => r.taskId === taskId && r.status !== 'open')
+    return this.state.requests.filter((r) => (r.taskIds || [r.taskId]).includes(taskId) && r.status !== 'open')
       .map((r) => `- 「${r.title}」→ ${r.status === 'dismissed' ? '対応しない（別の方法で進めること）' : r.reply || '対応済み'}`).join('\n');
   }
 
@@ -525,7 +612,7 @@ class Orchestrator extends EventEmitter {
       const diff = await this.repo.diff(e.baseSha, paths);
       res = await this.runAgent(reviewer, {
         role: 'reviewer', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.review,
-        prompt: prompts.review({ goal: this.cfg.goal, epic: e, diff, checkCommand: this.state.run.checkCommand }),
+        prompt: prompts.review({ goal: this.cfg.goal, epic: e, diff, checkCommand: this.state.run.checkCommand, artifacts: e.tasks.flatMap((t) => t.artifacts || []) }),
         onActivity: (text) => { e.review.note = `レビュー中: ${text}`; },
       });
     } catch (err) {
@@ -550,7 +637,7 @@ class Orchestrator extends EventEmitter {
         this.log('reject', `${e.id} 差し戻しが上限に達したため人間判断待ち`);
       } else {
         e.reviewRounds++;
-        out.fixes.forEach((f, i) => e.tasks.push(this.newTask({ ...f, id: `${e.id}-F${e.reviewRounds}${String.fromCharCode(97 + i)}`, risk: e.risk }, e)));
+        out.fixes.forEach((f, i) => e.tasks.push(this.newTask({ kind: 'coder', ...f, id: `${e.id}-F${e.reviewRounds}${String.fromCharCode(97 + i)}`, risk: e.risk }, e)));
         e.status = 'running';
         e.review = null;
         e.lastReviewNote = out.note;
@@ -562,13 +649,14 @@ class Orchestrator extends EventEmitter {
   }
 
   // ---------- 5. 人間への依頼 ----------
-  addRequests(list, { from, taskId = null, epicId = null }) {
+  addRequests(list, { from, taskId = null, epicId = null, taskIds = null }) {
     const added = [];
     for (const r of list || []) {
       // 同じ task から同じ依頼が繰り返されたら重ねない
       const dup = this.state.requests.find((x) => x.status === 'open' && x.taskId === taskId && x.title === r.title);
       if (dup) { added.push(dup); continue; }
-      const req = { id: `R${++this.reqSeq}`, kind: r.kind, title: r.title, detail: r.detail, blocking: Boolean(r.blocking && taskId), status: 'open', reply: '', from, taskId, epicId, createdAt: new Date().toISOString() };
+      const ids = taskIds || (taskId ? [taskId] : []);
+      const req = { id: `R${++this.reqSeq}`, kind: r.kind, title: r.title, detail: r.detail, blocking: Boolean(r.blocking && ids.length), status: 'open', reply: '', from, taskId: ids[0] || null, taskIds: ids, epicId, createdAt: new Date().toISOString() };
       this.state.requests.push(req);
       added.push(req);
       this.log('request', `依頼 ${req.id} [${req.kind}] ${req.title}${req.blocking ? '（ブロッキング）' : ''}`);
@@ -585,7 +673,7 @@ class Orchestrator extends EventEmitter {
     this.log('request', `${r.id} を${dismiss ? '却下' : '対応済み'}に${r.reply ? `: ${oneLine(r.reply)}` : ''}`);
     // ブロッキングの依頼が全部片付いた task は再開
     for (const t of this.state.epics.flatMap((e) => e.tasks)) {
-      if (t.status === 'blocked' && !this.state.requests.some((x) => x.taskId === t.id && x.blocking && x.status === 'open')) {
+      if (t.status === 'blocked' && !this.state.requests.some((x) => blocks(x, t))) {
         t.status = 'todo';
         this.log('start', `${t.id} を再開（依頼への返答つき）`);
       }
@@ -626,6 +714,9 @@ class Orchestrator extends EventEmitter {
 }
 
 class Failure extends Error {}
+
+// 依頼 r が task t を止めているか
+const blocks = (r, t) => r.blocking && r.status === 'open' && (r.taskIds || [r.taskId]).includes(t.id);
 
 const oneLine = (s, n = 120) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 const normRisk = (r = {}) => ({ complexity: clamp01(r.complexity ?? 0.5), uncertainty: clamp01(r.uncertainty ?? 0.5), blast: clamp01(r.blast ?? 0.5) });

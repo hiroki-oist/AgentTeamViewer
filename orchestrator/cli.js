@@ -16,7 +16,7 @@ const { values: v } = parseArgs({
     repo: { type: 'string' },
     goal: { type: 'string' },
     'goal-file': { type: 'string' },
-    ladder: { type: 'string', default: 'claude' },
+    ladder: { type: 'string', default: 'auto' },
     check: { type: 'string', default: '' },
     port: { type: 'string', default: '8000' },
     'budget-tokens': { type: 'string', default: '3000000' },
@@ -52,7 +52,7 @@ if (v.help || !v.repo || !(v.goal || v['goal-file'])) {
   --goal <text> | --goal-file <file>
 
 主なオプション:
-  --ladder claude|codex|mixed|mock   推論の重さの梯子（既定 claude。mock は CLI を呼ばない試運転）
+  --ladder auto|claude|codex|mixed|mock   推論の重さの梯子（既定 auto = Codex が使える環境なら混ぜる。mock は CLI を呼ばない試運転）
   --check "<cmd>"         各 task の後に走らせる検証コマンド（省略時は root が提案）
   --budget-tokens N       トークン予算（既定 3000000）。90% で新規 spawn を止める
   --budget-usd N          コスト予算 USD（既定 30。codex はコストを返さないためトークンで管理）
@@ -76,10 +76,18 @@ if (v.help || !v.repo || !(v.goal || v['goal-file'])) {
 }
 
 const num = (k) => Number(v[k]);
+
+// 使える runner を調べる。codex はログイン済みのときだけ使える扱いにする
+const works = (cmd, args) => { try { execFileSync(cmd, args, { stdio: 'ignore', timeout: 15000 }); return true; } catch { return false; } };
+const claudeBin = process.env.ATV_CLAUDE_BIN || 'claude';
+const codexBin = process.env.ATV_CODEX_BIN || 'codex';
+const available = { claude: works(claudeBin, ['--version']), codex: works(codexBin, ['login', 'status']) };
+const ladder = v.ladder !== 'auto' ? v.ladder : available.claude && available.codex ? 'mixed' : available.codex ? 'codex' : 'claude';
 const cfg = {
   repo: path.resolve(v.repo),
   goal: v.goal || fs.readFileSync(v['goal-file'], 'utf8').trim(),
-  ladder: v.ladder,
+  ladder,
+  available,
   check: v.check,
   budgetTokens: num('budget-tokens'),
   budgetUsd: num('budget-usd'),
@@ -103,8 +111,8 @@ const cfg = {
   workerTools: v['worker-tools'],
   codexSandbox: v['codex-sandbox'],
   codexModel: v['codex-model'],
-  claudeBin: process.env.ATV_CLAUDE_BIN || 'claude',
-  codexBin: process.env.ATV_CODEX_BIN || 'codex',
+  claudeBin,
+  codexBin,
 };
 
 (async () => {
@@ -119,6 +127,7 @@ const cfg = {
   }
   const url = `http://127.0.0.1:${port}/`;
   console.log(`ボード: ${url}`);
+  console.log(`runner: claude ${available.claude ? '○' : '×'} / codex ${available.codex ? '○' : '×'} → 梯子 ${ladder}`);
 
   let shared = null;
   if (v.tailscale) {
