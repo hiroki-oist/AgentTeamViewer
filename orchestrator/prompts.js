@@ -36,6 +36,20 @@ const SCHEMAS = {
   // 既存の計画に task 単位の依存を補う（--resume で古い計画を読んだとき）
   needs: obj({ tasks: { type: 'array', items: obj({ id: str, needs: strs, reason: str }) } }),
   report: obj({ markdown: str }),
+  // 点検役の一段目（小さいモデル）: 異常の可能性があるかだけを判定する
+  triage: obj({ suspicious: { type: 'boolean' }, reasons: strs }),
+  // 点検役: ボードを人の目線で読み、おかしなところを見つけて、許された範囲で直す
+  inspect: obj({
+    findings: { type: 'array', items: obj({ target: str, problem: str }) },
+    actions: {
+      type: 'array',
+      items: obj({
+        type: { type: 'string', enum: ['rewrite_request', 'answer_request', 'nudge_task', 'restart_task', 'rewrite_text', 'ask_human'] },
+        target: str, title: str, text: str, reason: str,
+      }),
+    },
+    improvements: strs,
+  }),
   // 既存の計画に、人が読む 1 行（brief / headline）を補う（--resume で古い計画を読んだとき）
   briefs: obj({
     epics: { type: 'array', items: obj({ id: str, brief: str }) },
@@ -98,7 +112,7 @@ ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-function work({ goal, task, epic, context, previous, replies, critique, kind, guard }) {
+function work({ goal, task, epic, context, previous, replies, critique, kind, guard, note }) {
   return `You are a worker agent in an autonomous team. Complete exactly one task in this git worktree (your current directory).
 
 YOUR ROLE (${kind.name}): ${kind.instructions}
@@ -111,7 +125,7 @@ ${task.description}
 
 You may create or modify ONLY these paths (a trailing "/" means the whole directory): ${task.writeSet.length ? task.writeSet.join(', ') : '(none — this is a read-only investigation; report findings in summary)'}
 Changes outside this list are rejected automatically and the attempt is counted as failed.
-${context ? `\nFinished work you can rely on:\n${context}\n` : ''}${previous ? `\nA previous attempt at this task failed. Evidence:\n${previous}\nFix the cause instead of repeating the same approach.\n` : ''}${replies ? `\nThe human answered earlier requests:\n${replies}\n` : ''}${critique ? `\nA critic reviewed the repeated failures of this task. Its diagnosis and guidance:\n${critique}\nFollow the guidance. If you find concrete evidence that it is wrong, do what the evidence says and explain it in summary.\n` : ''}
+${note ? `\nNote from the team's inspector (it watches the board for the human):\n${note}\n` : ''}${context ? `\nFinished work you can rely on:\n${context}\n` : ''}${previous ? `\nA previous attempt at this task failed. Evidence:\n${previous}\nFix the cause instead of repeating the same approach.\n` : ''}${replies ? `\nThe human answered earlier requests:\n${replies}\n` : ''}${critique ? `\nA critic reviewed the repeated failures of this task. Its diagnosis and guidance:\n${critique}\nFollow the guidance. If you find concrete evidence that it is wrong, do what the evidence says and explain it in summary.\n` : ''}
 PROGRESS (the person watching the board sees this): right after you understand the task, write .atv-progress.json in your current directory as {"steps": [{"title": "...", "done": false}, ...], "now": "..."} — 3 to 7 steps in plain Japanese (what, not how; no paths), and "now" = what you are doing at the moment in one short phrase. Rewrite the file whenever a step finishes or the plan changes (add, drop, or split steps as needed), right before any command that may take more than a minute (say what it is and how long you expect), and at least every 5 minutes — a stale "now" misleads the person watching. Anything expected to take more than about 5 minutes (rendering, training, long benchmarks) should run with nohup in the background; then return status "waiting" with waitMinutes instead of sitting in the session. If a step waits on a long job, say so in "now" with the expected time (e.g. 「学習の計測待ち（あと 10 分ほど）」). The file is never committed.
 Be economical: read only what you need, and run the smallest check that proves the task works. You do not need to commit; the orchestrator commits and merges for you.
 Finish with status "done" when the task is complete and verified; "waiting" if a job you started (training, rendering, a benchmark) must finish before you can go on — set waitMinutes to when it is worth checking again, and the orchestrator will resume the task then with your partial work kept (do not ask the human for this); "blocked" only if the human must do or decide something (see below; always with a concrete humanRequest); or "gave_up" if the task as written is impossible (explain why in summary). waitMinutes = 0 unless status is "waiting".
@@ -230,4 +244,51 @@ Write the report as Markdown in "markdown". It is a plain factual log of what wa
 ${LANG}`;
 }
 
-module.exports = { SCHEMAS, HUMAN, prompts: { plan, work, critique, review, needs, briefs, report } };
+// 点検役の一段目: 安く速く「怪しいところがあるか」だけを見る
+function triage({ board }) {
+  return `You screen the board of an autonomous agent team for a human supervisor. Decide only whether something MAY be wrong and deserves a closer look by a stronger model. Do not fix anything.
+
+BOARD STATE (now; times are minutes):
+${board}
+
+Flag (suspicious = true) if any of these may hold:
+- an open request whose title/detail does not say what the person must do or decide, or that seems to need no human (e.g. an agent waiting for its own job)
+- a running task whose progress was last updated 10+ minutes ago, or that has run well beyond the average task time
+- the same failure repeating, or a task waiting on something that will not happen
+- a headline/brief/request a person could not understand at a glance
+- anything else that looks off
+Otherwise suspicious = false. reasons: short phrases naming the target (e.g. "R3: 何を頼んでいるか書いていない"), [] if not suspicious. Be quick; when in doubt, flag.
+${LANG}`;
+}
+
+// 点検役（二段目）
+function inspect({ goal, board, rules, triage }) {
+  return `You are the inspector of an autonomous agent team. The human watches a shared board and should not have to catch problems themselves. Read the board state below as that person would, find what is wrong or misleading, and fix what you are allowed to fix. You do not do the project's work.
+
+GOAL: ${goal}
+
+BOARD STATE (now; times are minutes):
+${board}
+${triage ? `\nA first-pass screen flagged: ${triage}\nCheck these first, but judge for yourself.\n` : ''}
+Look for:
+- human requests that do not say what the person must do or decide (or that need no human at all, e.g. an agent waiting for its own job)
+- running tasks whose progress has not been updated for a long time, or that run far beyond the average, or that seem to sit in a long command instead of running it in the background and returning "waiting"
+- the same failure repeating; tasks waiting on something that will not happen; resources idle while work waits
+- headlines, briefs or request texts a person cannot read at a glance
+- anything else a careful human supervisor would flag
+
+Actions you may take (target = request id like "R3" or task id like "E5-T1"):
+- rewrite_request: replace a request's title (≤40 chars) and text (detail) so the person knows exactly what to do or decide and how to answer.
+- answer_request: close a request that needs no human (only kind "decision"/"other"; never install/auth/access). text = the answer the agent will get (what to do instead).
+- nudge_task: attach a note that the task's next attempt will read (e.g. "update progress every 5 minutes; run the rendering with nohup and return waiting").
+- restart_task: stop a running task now and retry it with the note in text; its partial work is kept. Only for a task that is clearly stuck: ${rules.restart}.
+- rewrite_text: replace a task's headline (title field = "headline") or brief (title = "brief"), or an epic's brief, with plain text in text.
+- ask_human: raise a new request when only the person can decide something (title + text with the concrete question and answer options).
+Take no action when things are fine. Do not repeat an action that the board shows was already taken.
+findings: short plain notes of what you saw (also when you took no action), [] if nothing.
+improvements: problems whose cause is the orchestrator's own design (not this project), as concrete suggestions for its developer; [] if none.
+${HUMAN}
+${LANG}`;
+}
+
+module.exports = { SCHEMAS, HUMAN, prompts: { plan, work, critique, review, needs, briefs, report, triage, inspect } };

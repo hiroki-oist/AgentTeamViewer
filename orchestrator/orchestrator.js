@@ -185,6 +185,7 @@ class Orchestrator extends EventEmitter {
       ? `保護パスを読み取り専用にしてエージェントを動かす（bwrap）: ${this.protector.paths.join(', ')}`
       : `bwrap が使えないため、保護パスの変化を監視する（見つけたら新規 spawn を停止）: ${this.protector.paths.join(', ')}`);
     this.protectTimer = setInterval(() => this.checkProtected(), 5000);
+    if (this.cfg.inspectMin > 0) this.inspectTimer = setInterval(() => this.inspectSoon('定期'), this.cfg.inspectMin * 60000);
 
     // 1 分ごとに累計を記録する（予算枯渇の予測は直近 1 時間の実際の増え方から出す。24 時間ぶん持つ）
     const record = () => {
@@ -270,6 +271,8 @@ class Orchestrator extends EventEmitter {
     clearInterval(this.tickTimer);
     clearInterval(this.planTimer);
     clearInterval(this.protectTimer);
+    clearInterval(this.inspectTimer);
+    clearTimeout(this.inspectDebounce);
     clearTimeout(this.probeTimer);
     for (const c of this.controllers) c.abort();
     await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => setTimeout(r, 10000))]);
@@ -280,6 +283,7 @@ class Orchestrator extends EventEmitter {
     const a = this.state.agents[agentId];
     const ctrl = new AbortController();
     this.controllers.add(ctrl);
+    (this.ctrlByAgent ||= new Map()).set(agentId, ctrl);
     a.state = 'active';
     this.changed();
     let reported = 0;
@@ -304,6 +308,7 @@ class Orchestrator extends EventEmitter {
     this.addUsage(d, res.costUsd || 0);
     onTokens?.(d);
     this.controllers.delete(ctrl);
+    this.ctrlByAgent.delete(agentId);
     a.activity = null;
     a.state = 'waiting';
     this.changed();
@@ -476,6 +481,127 @@ class Orchestrator extends EventEmitter {
       }
     }
     this.changed();
+  }
+
+  // ---------- 点検役 ----------
+  // 人がボードで気づくはずのおかしさ（読めない依頼、止まった進み具合、長すぎる task…）を先に見つけて、許された範囲で直す
+  inspectSoon(reason, delayMs = 0) {
+    if (!(this.cfg.inspectMin > 0) || this.shuttingDown || this.state.run.draining) return;
+    if (this.inspectDebounce) return;
+    const since = Date.now() - (this.lastInspectAt || 0);
+    const wait = Math.max(delayMs, 3 * 60000 - since, 0); // 3 分に 1 回まで
+    this.inspectDebounce = setTimeout(() => { this.inspectDebounce = null; this.runInspector(reason); }, wait);
+  }
+
+  boardDigest() {
+    const nowMs = Date.now();
+    const m = (iso) => (iso ? Math.round((nowMs - Date.parse(iso)) / 60000) : null);
+    const done = this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' && t.attempts.length);
+    const durs = done.map((t) => (Date.parse(t.attempts[t.attempts.length - 1].endedAt || t.attempts[0].startedAt) - Date.parse(t.attempts[0].startedAt)) / 60000).filter((x) => x > 0);
+    const avg = durs.length ? Math.round(durs.reduce((a, b) => a + b, 0) / durs.length) : null;
+    const lines = [`run: ${this.state.run.status}${this.state.run.paused ? ' (paused)' : ''}; average finished task ${avg ?? '?'} min; active agents ${this.activeCount()}/${this.state.watchdog.limits.maxActiveAgents}`];
+    for (const e of this.state.epics) {
+      lines.push(`EPIC ${e.id} [${e.status}] ${e.title} — brief: ${e.brief || '(none)'}${e.review ? ` — review: ${oneLine(e.review.note, 120)}` : ''}`);
+      for (const t of e.tasks) {
+        if (t.status === 'done' && e.status === 'done') continue;
+        const a = t.attempts[t.attempts.length - 1];
+        const p = a?.progress;
+        lines.push(`  TASK ${t.id} [${t.status}] ${t.title} — brief: ${t.brief || '(none)'}${t.headline ? ` — headline: ${t.headline}` : ''}`
+          + (a ? `\n    attempt ${t.attempts.length} ${a.model}/${a.effort} ${a.result}, running ${m(a.startedAt)} min${a.endedAt ? `, ended ${m(a.endedAt)} min ago` : ''}${a.note ? `, note: ${oneLine(a.note, 200)}` : ''}` : '')
+          + (p ? `\n    progress (updated ${m(p.at)} min ago): ${p.steps.map((x) => `${x.done ? '✓' : '○'}${x.title}`).join(' / ')}; now: ${p.now}` : '')
+          + (t.status === 'running' && t.activity ? `\n    last tool call: ${oneLine(t.activity, 120)}` : '')
+          + (t.status === 'waiting' ? `\n    waiting until ${t.wakeAt}` : '')
+          + ((t.notes || []).length ? `\n    inspector notes already given: ${t.notes.slice(-2).map((x) => oneLine(x, 100)).join(' | ')}` : '')
+          + (t.attempts.length > 1 ? `\n    earlier attempts: ${t.attempts.slice(0, -1).map((x) => `${x.result}${x.note ? `(${oneLine(x.note, 80)})` : ''}`).join(', ')}` : ''));
+      }
+    }
+    const open = this.state.requests.filter((r) => r.status === 'open');
+    lines.push(`OPEN REQUESTS (${open.length}):`);
+    for (const r of open) lines.push(`  ${r.id} [${r.kind}${r.blocking ? ', blocking' : ''}] from ${r.from} task ${r.taskId || '-'} age ${m(r.createdAt)} min — title: ${r.title}\n    detail: ${oneLine(r.detail, 400)}`);
+    lines.push('RECENT EVENTS:', ...this.state.events.slice(-15).map((x) => `  ${x.t} ${x.kind} ${oneLine(x.msg, 140)}`));
+    return lines.join('\n');
+  }
+
+  async runInspector(reason) {
+    if (this.inspecting || this.shuttingDown || this.state.run.draining) return;
+    if (!this.state.epics.length || this.state.run.status === 'done') return;
+    this.inspecting = true;
+    this.lastInspectAt = Date.now();
+    // 一段目: 梯子のいちばん下（haiku/low）が「怪しいか」だけを見る。怪しいときだけ二段目（梯子の 4 段目、sonnet/high）が検査して直す
+    const low = this.ladder[0], high = this.ladder[Math.min(3, this.ladder.length - 1)];
+    const agent = this.inspectorAgent || (this.inspectorAgent = this.newAgent('inspector', low));
+    const set = (r) => Object.assign(this.state.agents[agent], { runner: r.runner, model: r.model, effort: r.effort });
+    try {
+      const board = this.boardDigest();
+      set(low);
+      const tri = await this.runAgent(agent, { role: 'inspector', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.triage, prompt: prompts.triage({ board }) });
+      if (!tri.ok) { this.log('warn', `点検（一段目）が失敗: ${oneLine(tri.error)}`); return; }
+      if (!tri.output.suspicious) {
+        this.state.inspector = { at: new Date().toISOString(), reason, stage: 1, findings: [], actions: [], screen: '異常なし' };
+        return;
+      }
+      const flagged = (tri.output.reasons || []).join(' / ');
+      this.log('inspect', `点検（${reason}）: 一段目が異常の可能性を報告 → ${high.model}/${high.effort} で検査: ${oneLine(flagged, 160)}`);
+      set(high);
+      const rules = { restart: 'its progress has not been updated for at least 20 minutes AND it has run at least twice the average finished task duration' };
+      const res = await this.runAgent(agent, { role: 'inspector', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.inspect, prompt: prompts.inspect({ goal: this.cfg.goal, board, rules, triage: flagged }) });
+      if (!res.ok) { this.log('warn', `点検（二段目）が失敗: ${oneLine(res.error)}`); return; }
+      this.applyInspection(res.output, reason);
+      this.state.inspector.stage = 2;
+      this.state.inspector.screen = flagged;
+    } finally { this.state.agents[agent].state = 'finished'; this.inspecting = false; this.changed(); }
+  }
+
+  applyInspection(out, reason) {
+    const tasks = new Map(this.state.epics.flatMap((e) => e.tasks.map((t) => [t.id, { t, e }])));
+    const epics = new Map(this.state.epics.map((e) => [e.id, e]));
+    const done = [];
+    for (const a of out.actions || []) {
+      const r = this.state.requests.find((x) => x.id === a.target && x.status === 'open');
+      const te = tasks.get(a.target);
+      if (a.type === 'rewrite_request' && r) {
+        r.title = oneLine(a.title || r.title, 80); r.detail = String(a.text || r.detail).slice(0, 2000); r.rewrittenBy = 'inspector';
+        done.push(`${r.id} の文面を書き直した`);
+      } else if (a.type === 'answer_request' && r && ['decision', 'other'].includes(r.kind)) {
+        this.resolveRequest(r.id, { reply: `（点検役が回答）${a.text}` });
+        done.push(`${r.id} に回答して閉じた（${oneLine(a.reason, 60)}）`);
+      } else if (a.type === 'nudge_task' && te) {
+        (te.t.notes ||= []).push(String(a.text).slice(0, 600));
+        done.push(`${te.t.id} の次の試行に注意を添えた`);
+      } else if (a.type === 'restart_task' && te && te.t.status === 'running') {
+        // 本当に止まっているときだけ（進み具合が 20 分以上更新されず、平均の 2 倍以上走っている）
+        const at = te.t.attempts[te.t.attempts.length - 1];
+        const stale = (Date.now() - Date.parse(at.progress?.at || at.startedAt)) / 60000;
+        const d = this.state.epics.flatMap((e) => e.tasks).filter((x) => x.status === 'done' && x.attempts.length)
+          .map((x) => (Date.parse(x.attempts[x.attempts.length - 1].endedAt || 0) - Date.parse(x.attempts[0].startedAt)) / 60000).filter((x) => x > 0);
+        const avg = d.length ? d.reduce((p, q) => p + q, 0) / d.length : Infinity;
+        const ran = (Date.now() - Date.parse(at.startedAt)) / 60000;
+        if (stale >= 20 && ran >= 2 * avg) {
+          (te.t.notes ||= []).push(String(a.text).slice(0, 600));
+          te.t.abortReason = `点検役が止めてやり直し: ${oneLine(a.reason, 120)}`;
+          this.ctrlByAgent?.get(te.t.agent)?.abort();
+          done.push(`${te.t.id} を止めてやり直しに回した`);
+        } else done.push(`${te.t.id} のやり直しは見送り（条件を満たさない）`);
+      } else if (a.type === 'rewrite_text') {
+        const field = a.title === 'brief' ? 'brief' : 'headline';
+        if (te) { te.t[field] = oneLine(a.text, 120); done.push(`${te.t.id} の${field === 'brief' ? '説明' : '見出し'}を書き直した`); }
+        else if (epics.get(a.target)) { epics.get(a.target).brief = oneLine(a.text, 120); done.push(`${a.target} の説明を書き直した`); }
+      } else if (a.type === 'ask_human') {
+        this.addRequests([{ kind: 'decision', blocking: false, title: oneLine(a.title, 80), detail: String(a.text).slice(0, 2000) }], { from: 'inspector', taskId: tasks.has(a.target) ? a.target : null });
+        done.push(`判断を依頼した: ${oneLine(a.title, 60)}`);
+      }
+    }
+    this.state.inspector = { at: new Date().toISOString(), reason, findings: (out.findings || []).slice(0, 12), actions: done };
+    if (done.length || (out.findings || []).length) this.log('inspect', `点検（${reason}）: ${done.join(' / ') || '対応なし'}${(out.findings || []).length ? `。所見: ${(out.findings || []).slice(0, 3).map((f) => oneLine(f.problem, 60)).join(' / ')}` : ''}`);
+    // atv 自体の作りに原因があるものは、開発者向けに書き溜める
+    const imp = (out.improvements || []).map((x) => String(x).trim()).filter(Boolean);
+    if (imp.length) {
+      const file = path.join(this.repo.dir, 'improvements.md');
+      const have = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '# atv の改善点（点検役が書き溜める）\n';
+      const fresh = imp.filter((x) => !have.includes(x));
+      if (fresh.length) fs.writeFileSync(file, `${have}\n## ${new Date().toLocaleString('ja-JP')}（${reason}）\n${fresh.map((x) => `- ${x}`).join('\n')}\n`);
+    }
+    this.schedule();
   }
 
   // ---------- プロジェクト報告書 ----------
@@ -668,7 +794,7 @@ class Orchestrator extends EventEmitter {
         tools: [...kind.tools, ...t.grants], disallowed: GUARD.claudeDisallowed,
         replies: this.repliesFor(t.id),
         critique: this.critiqueFor(t),
-        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}` }),
+        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}`, note: (t.notes || []).slice(-2).join('\n') }),
         onActivity: (text) => { t.activity = text; },
       }, (d) => { t.tokens += d; attempt.tokens += d; });
       const granted = this.grantFromDenials(t, res.denials);
@@ -745,8 +871,9 @@ class Orchestrator extends EventEmitter {
       this.log('done', `${t.id} 完了: ${out.headline || oneLine(out.summary)}`);
     } catch (err) {
       // オーケストレータの停止・再起動で中断されたなら、失敗に数えず途中の変更を次の試行に持ち込む
-      if (this.shuttingDown) {
-        finish('interrupted', 'オーケストレータの停止・再起動で中断');
+      if (this.shuttingDown || t.abortReason) {
+        finish('interrupted', t.abortReason || 'オーケストレータの停止・再起動で中断');
+        t.abortReason = null;
         if (wt && (await this.repo.commitAll(wt, `atv: ${t.id} (中断時点) ${t.title}`).catch(() => [])).length) { wt.keep = true; t.carryBranch = wt.branch; }
         t.status = 'todo';
         return;
@@ -764,6 +891,7 @@ class Orchestrator extends EventEmitter {
         needCritic = this.cfg.criticAfter > 0 && n >= this.cfg.criticAfter;
         t.status = needCritic ? 'critique' : 'todo';
         this.log('fail', `${t.id} 失敗 (${attempt.model}/${attempt.effort}): ${oneLine(note)}`);
+        this.inspectSoon('task が失敗', 60000);
       }
     } finally {
       clearInterval(progressTimer);
@@ -941,6 +1069,7 @@ class Orchestrator extends EventEmitter {
       this.state.requests.push(req);
       added.push(req);
       this.log('request', `依頼 ${req.id} [${req.kind}] ${req.title}${req.blocking ? '（ブロッキング）' : ''}`);
+      if (from !== 'inspector') this.inspectSoon('依頼が出た', 60000);
     }
     return added.filter((r) => r.blocking);
   }

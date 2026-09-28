@@ -36,6 +36,14 @@ ATV.watchdog = (() => {
       if (!state.run?.planHold && f && L.planFiveHourStop > 0 && f.utilization >= Math.min(0.8, L.planFiveHourStop)) push('warn', `5 時間枠 ${pct(f.utilization)}`);
     }
 
+    // 2''. 点検役の最後の結果
+    const ins = state.inspector;
+    if (ins) {
+      const hm = new Date(ins.at).toTimeString().slice(0, 5);
+      if (ins.stage === 2) push(ins.actions?.length ? 'warn' : 'ok', `点検 ${hm}: ${ins.actions?.length ? ins.actions.join(' / ') : '検査したが対応なし'}`);
+      else push('ok', `点検 ${hm}: 異常なし`);
+    }
+
     // 3. 同時稼働エージェント数
     const active = Object.values(state.agents).filter((a) => a.state === 'active' && a.role !== 'watchdog').length;
     if (active > w.limits.maxActiveAgents) push('crit', `稼働エージェント ${active} > 上限 ${w.limits.maxActiveAgents}`);
