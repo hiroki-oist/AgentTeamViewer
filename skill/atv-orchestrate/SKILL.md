@@ -104,6 +104,7 @@ run が終わったら、root が作った型（`.atv/<runId>/kinds/*.md`）を�
 - **失敗した task**（`status: "failed"`）: その task の `attempts[].note` と `critiques[]` を読んで原因を説明する。再試行させるなら `{"action":"retry","taskId":"<id>"}`
 - **差し戻しの上限で止まった epic**（`review.verdict: "needs-human"`）: レビューの note を説明する。ユーザーが承認するなら `{"action":"approve","epicId":"<id>"}`
 - **利用枠で止まった**（`run.planHold`、status `plan-limit`）: `watchdog.plan` の使用率とリセット時刻を見せる。リセット時刻に自動で再開する。待たずに続けるとユーザーが決めたら `{"action":"unhold"}`
+- **保護パスで止まった**（status `protect-hold`、`run.protectHold`）: 変更されたパスと、その時動いていた task を見せる。エージェントの書き込みなら中身を見て元に戻すか task の worktree へ移すかをユーザーと決め、ユーザー自身の編集ならそのまま。済んだら `{"action":"protect-ok"}`
 - **予算で止まった**（`run.frozen`）: 使用量を見せる。ユーザーが広げると決めたら `{"action":"unfreeze"}`（予算が 1.5 倍になる）
 - **一時停止 / 再開**: `{"action":"pause"}` / `{"action":"resume"}`
 - **完了**（`run.status: "done"`）: `git log --graph --oneline <run.branch>` と `git diff HEAD...<run.branch> --stat` を見せ、中身を確認してからマージするよう勧める。マージはユーザーが指示したときだけ行う

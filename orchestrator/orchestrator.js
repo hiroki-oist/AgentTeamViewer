@@ -15,6 +15,7 @@ const runners = require('./runners.js');
 const { Repo, covered } = require('./git.js');
 const { SCHEMAS, prompts } = require('./prompts.js');
 const { Kinds, GUARD, NO_AUTO_GRANT, guarded } = require('./kinds.js');
+const { Protector } = require('./protect.js');
 
 const hhmm = (d = new Date()) => d.toTimeString().slice(0, 5);
 const clamp01 = (x) => Math.min(1, Math.max(0, Number(x) || 0));
@@ -138,6 +139,22 @@ class Orchestrator extends EventEmitter {
     }, delayMs);
   }
 
+  // 保護パスに起動時（か人間の了承時）からの変化があれば、新規 spawn を止めて知らせる
+  async checkProtected() {
+    if (this.checkingProtected || this.state.run.protectHold || this.shuttingDown) return;
+    this.checkingProtected = true;
+    try {
+      const changed = await this.protector.changes();
+      if (!changed.length) return;
+      const running = this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'running').map((t) => t.id);
+      this.state.run.protectHold = { paths: changed.slice(0, 50), tasks: running, at: new Date().toISOString() };
+      this.log('watchdog', `保護パスが変更された: ${changed.slice(0, 5).join(', ')}${changed.length > 5 ? ` ほか ${changed.length - 5} 件` : ''}（その時動いていた task: ${running.join(', ') || 'なし'}）。新規 spawn を停止`);
+      this.addRequests([{ kind: 'decision', blocking: false, title: '保護パス（元の作業ツリーなど）が変更された',
+        detail: `変更されたパス:\n${changed.slice(0, 20).join('\n')}\n\nその時動いていた task: ${running.join(', ') || 'なし'}。エージェントの書き込みなら中身を確かめて元に戻し、あなた自身の編集ならそのままで構いません。済んだらボードの「保護パスを確認した」か {"action":"protect-ok"} を送ると、今の状態を新しい基準にして再開します。` }], { from: 'watchdog' });
+      this.schedule();
+    } finally { this.checkingProtected = false; }
+  }
+
   activeCount() {
     return Object.values(this.state.agents).filter((a) => a.state === 'active' && a.role !== 'watchdog').length;
   }
@@ -154,6 +171,17 @@ class Orchestrator extends EventEmitter {
     this.log('start', `統合ブランチ ${this.repo.mainBranch} を作成（${this.repo.mainPath}）`);
     this.kinds = new Kinds({ repoRoot: this.repo.root, runDir: this.repo.dir, available: this.cfg.available || { claude: true, codex: false } });
     this.state.kinds = this.kinds.summary();
+
+    // 元の作業ツリー（と --protect のパス）への書き込みを塞ぐ。runner は cfg.protector で包む
+    const gitDir = path.resolve(this.repo.root, (await require('./git.js').git(this.repo.root, ['rev-parse', '--git-common-dir'])).out);
+    this.protector = new Protector({ paths: [this.repo.root, ...(this.cfg.protect || [])], gitDir, bwrap: this.cfg.bwrap, ignore: ['.atv/'] });
+    this.cfg.protector = this.protector;
+    await this.protector.rebaseline();
+    this.state.run.protect = { mode: this.protector.mode, paths: this.protector.paths };
+    this.log('start', this.protector.mode === 'bwrap'
+      ? `保護パスを読み取り専用にしてエージェントを動かす（bwrap）: ${this.protector.paths.join(', ')}`
+      : `bwrap が使えないため、保護パスの変化を監視する（見つけたら新規 spawn を停止）: ${this.protector.paths.join(', ')}`);
+    this.protectTimer = setInterval(() => this.checkProtected(), 5000);
 
     this.minuteTimer = setInterval(() => { const b = this.state.watchdog.burn; b.push(0); b.shift(); this.changed(); }, 60000);
     this.tickTimer = setInterval(() => this.schedule(), 1000);
@@ -180,6 +208,7 @@ class Orchestrator extends EventEmitter {
     clearInterval(this.minuteTimer);
     clearInterval(this.tickTimer);
     clearInterval(this.planTimer);
+    clearInterval(this.protectTimer);
     clearTimeout(this.probeTimer);
     for (const c of this.controllers) c.abort();
     await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => setTimeout(r, 10000))]);
@@ -326,7 +355,7 @@ class Orchestrator extends EventEmitter {
   schedule() {
     const run = this.state.run;
     if (this.shuttingDown) return;
-    if (!['running', 'paused', 'waiting-human', 'stuck', 'budget-stopped', 'plan-limit', 'done'].includes(run.status)) return;
+    if (!['running', 'paused', 'waiting-human', 'stuck', 'budget-stopped', 'plan-limit', 'protect-hold', 'done'].includes(run.status)) return;
     const lockInfo = locks.compute(this.state);
     const wd = watchdog.evaluate(this.state, lockInfo);
     const w = this.state.watchdog;
@@ -339,7 +368,7 @@ class Orchestrator extends EventEmitter {
     if (vkey && vkey !== this.lastViolation) this.log('watchdog', `ロック違反を検出: ${vkey}`);
     this.lastViolation = vkey;
     this.checkPlan();
-    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && this.activeCount() < w.limits.maxActiveAgents;
+    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && this.activeCount() < w.limits.maxActiveAgents;
 
     const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done').map((e) => e.id));
     for (const e of this.state.epics) {
@@ -370,13 +399,14 @@ class Orchestrator extends EventEmitter {
         (e.status === 'todo' && e.dependsOn.every((d) => doneIds.has(d))));
       if (run.frozen) next = 'budget-stopped';
       else if (run.planHold) next = 'plan-limit';
+      else if (run.protectHold) next = 'protect-hold';
       else if (run.paused && startable) next = 'paused';
       else if (this.state.epics.some((e) => e.tasks.some((t) => t.status === 'blocked'))) next = 'waiting-human';
       else if (!startable) next = 'stuck';
     }
     if (next !== run.status) {
       run.status = next;
-      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, paused: '一時停止中', running: '実行中' }[next];
+      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, 'protect-hold': '保護パスの変更を検知して停止中（依頼パネルを確認）', paused: '一時停止中', running: '実行中' }[next];
       this.log(next === 'done' ? 'done' : 'watchdog', msg);
     }
     this.lastWatchdog = wd;
@@ -417,12 +447,18 @@ class Orchestrator extends EventEmitter {
     };
     try {
       wt = await this.repo.createTaskWorktree(t.id, t.attempts.length);
+      // 前の試行が人間待ちで止まっていたら、その途中の変更を持ち込む
+      if (t.carryBranch) {
+        const ok = await this.repo.carryOver(wt, t.carryBranch);
+        this.log(ok ? 'start' : 'warn', `${t.id}: 前の試行の途中の変更を${ok ? '持ち込んだ' : '持ち込めなかった（マージ競合）'}`);
+        t.carryBranch = null;
+      }
       const res = await this.runAgent(t.agent, {
         role: 'worker', cwd: wt.path, schema: SCHEMAS.work, task: t, kind,
         tools: [...kind.tools, ...t.grants], disallowed: GUARD.claudeDisallowed,
         replies: this.repliesFor(t.id),
         critique: this.critiqueFor(t),
-        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: GUARD.text }),
+        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}` }),
         onActivity: (text) => { t.activity = text; },
       }, (d) => { t.tokens += d; attempt.tokens += d; });
       const granted = this.grantFromDenials(t, res.denials);
@@ -439,6 +475,14 @@ class Orchestrator extends EventEmitter {
       const blocking = this.addRequests(out.humanRequests, { from: t.agent, taskId: t.id, epicId: e.id });
 
       if (out.status === 'blocked' || blocking.length) {
+        // 途中の変更は捨てずにブランチに残し、次の試行で持ち込む
+        if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
+        // blocked なのに依頼がないと、誰も何もできずに止まる。要約をそのまま依頼にする
+        if (!blocking.length) {
+          blocking.push(...this.addRequests([{ kind: 'decision', blocking: true, title: `${t.id} が止まった理由を確認してほしい`,
+            detail: `${out.summary || '(要約なし)'}\n\n指示を返信すると、それを添えて再開します。「却下」なら別の進め方で再開します。${t.carryBranch ? `\n途中の変更はブランチ ${t.carryBranch} に残してあり、次の試行に持ち込みます。` : ''}` }],
+          { from: t.agent, taskId: t.id, epicId: e.id }));
+        }
         finish('blocked', out.summary);
         t.status = 'blocked';
         this.log('request', `${t.id} は人間待ち: ${blocking.map((r) => r.title).join(' / ') || out.summary}`);
@@ -692,6 +736,12 @@ class Orchestrator extends EventEmitter {
       w.budget.costUsd = Math.round(w.budget.costUsd * 1.5 * 100) / 100;
       run.frozen = false;
       this.log('control', `予算を 1.5 倍に拡張して再開（${w.budget.tokens} tok / $${w.budget.costUsd}）`);
+    } else if (action === 'protect-ok') {
+      if (!run.protectHold) throw new Error('保護パスで止まっていない');
+      run.protectHold = null;
+      this.log('control', '保護パスの変更を人間が確認。今の状態を新しい基準にして再開');
+      this.checkingProtected = true; // 基準を取り直すまで検知を止める
+      this.protector.rebaseline().then(() => { this.checkingProtected = false; this.schedule(); });
     } else if (action === 'unhold') {
       if (!run.planHold) throw new Error('利用枠で止まっていない');
       run.planOverride = { window: run.planHold.window, until: run.planHold.until };

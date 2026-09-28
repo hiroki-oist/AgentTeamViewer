@@ -41,6 +41,27 @@ atv --repo /tmp/sandbox-repo --goal "試し" --ladder mock
 - CLI は macOS アプリ同梱のもの → PATH の `tailscale` → root なしの userspace 版（`~/tailscale-user/`）の順に探す。別の場所なら `ATV_TAILSCALE_BIN`（と `ATV_TAILSCALE_SOCKET`）で指定する
 - ボードには認証がない。tailnet に他人の端末があると、その人も一時停止や依頼への返答ができる
 
+### 元の作業ツリーを守る（保護パス）
+
+エージェントは task ごとの worktree（`.atv/<runId>/tasks/…`）で作業する。元の作業ツリー（と `--protect` で足したディレクトリ）には書かせない。指示文だけに頼らず、次の 2 段で塞ぐ。
+
+- **防ぐ（bwrap）**: bwrap が使えれば、エージェントを「保護パスは読み取り専用、自分の worktree と `.git` だけ書ける」マウント名前空間で動かす。Bash 経由（python・リダイレクト）の書き込みもカーネルが止める。ssh やネットワークはそのまま使える
+- **見つける（常に）**: 保護パスのうち git 作業ツリーのものを 5 秒ごとに `git status` で見張る。起動時からの変化を見つけたら新規 spawn を止め（status `protect-hold`）、その時動いていた task を添えて依頼を出す。自動では消さない。確かめたらボードの「保護パスを確認した」（`{"action":"protect-ok"}`）で、今の状態を新しい基準にして再開する。run 中にあなた自身が元の作業ツリーを編集しても止まるので、そのときも同じボタンで再開する
+
+Ubuntu 24.04 以降は AppArmor が非特権の user namespace を止めるため、そのままでは bwrap が動かず「見つける」だけになる（起動ログに出る）。bwrap を許すには一度だけ次を実行する:
+
+```bash
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'P'
+abi <abi/4.0>,
+include <tunables/global>
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+P
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
 `index.html` を直接開くか、サーバーなしで配信した場合は、ダミーデータのデモモードで動く（`?autoplay` でシミュレーション自動開始）。
 
 作業は対象 repo の `.atv/<runId>/` 以下の worktree で行い、元の作業ツリーには触れない（`.atv/` は `.git/info/exclude` に追加される）。完了したら統合ブランチ `atv/<runId>/main` を確認してから自分でマージする。
@@ -94,7 +115,7 @@ goal ─▶ root が計画（読み取り専用。epic / task / writeSet / risk 
 
 | 層 | 中身 |
 |---|---|
-| ① 共通の安全柵 | push・git remote・sudo・apt / brew install・ssh / scp・publish・gh は型に関係なく禁止（claude には `--disallowedTools`）。必要なら「あなたへの依頼」を通す |
+| ① 共通の安全柵 | push・git remote・sudo・apt / brew install・publish・gh は型に関係なく禁止（claude には `--disallowedTools`）。必要なら「あなたへの依頼」を通す。ssh / scp は許可（goal に書いた計算機へジョブを投げるため） |
 | ② 型の既定値 | 役割の指示、追加のツール、runner（`any` / `claude` / `codex`）、梯子の最低段、検証の方法、必要なコマンド |
 | ③ その場の拡張 | 権限で拒否された操作のうち ① に触れず、壊す・外と通信する系（rm, mv, curl, wget など）でもないものは、次の試行で自動で許可する |
 

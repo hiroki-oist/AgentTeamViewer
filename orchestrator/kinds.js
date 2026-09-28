@@ -20,10 +20,10 @@ const RUNNERS = ['any', 'claude', 'codex'];
 // ① 共通の安全柵。claude には --disallowedTools で渡し、全 worker の指示にも書く
 const GUARD = {
   claudeDisallowed: [
-    'Bash(git push:*)', 'Bash(git remote:*)', 'Bash(sudo:*)', 'Bash(su:*)', 'Bash(ssh:*)', 'Bash(scp:*)',
+    'Bash(git push:*)', 'Bash(git remote:*)', 'Bash(sudo:*)', 'Bash(su:*)',
     'Bash(brew install:*)', 'Bash(apt:*)', 'Bash(apt-get:*)', 'Bash(npm publish:*)', 'Bash(gh:*)', 'Bash(docker push:*)',
   ],
-  text: 'Never: push or change git remotes, use sudo / system package managers (apt, brew install), ssh/scp to other machines, publish packages, call paid external APIs, read or print secrets, or write outside your working directory. If the task needs any of these, ask the human via humanRequests instead.',
+  text: 'Never: push or change git remotes, use sudo / system package managers (apt, brew install), publish packages, call paid external APIs, or read or print secrets. ssh/scp to machines named in the goal is allowed. If the task needs any of these, ask the human via humanRequests instead.',
 };
 
 // ③ で自動では広げないコマンド（壊す・外と通信する・プロセスを止める）。必要なら人間への依頼を通す

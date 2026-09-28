@@ -14,7 +14,7 @@
   const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔' };
   const STATUS_LABEL = { ok: '✓ OK', warn: '▲ WARN', crit: '✕ CRIT' };
   const ALERT_ICON = { ok: '✓', warn: '▲', crit: '✕' };
-  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', done: '完了', failed: '失敗' };
+  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', 'protect-hold': '保護パスで停止', done: '完了', failed: '失敗' };
   const CRITIC_VERDICT = { change_approach: 'やり方を変える', task_is_wrong: 'task を定義し直す', needs_human: '人間の判断が必要' };
   const REQ_KIND = { install: 'インストール', auth: '認証', access: '権限', decision: '判断', other: 'その他' };
 
@@ -87,6 +87,7 @@
       $('#sim-toggle').textContent = run.paused ? '▶ 再開' : '⏸ 一時停止';
       $('#unfreeze').hidden = !run.frozen;
       $('#unhold').hidden = !run.planHold;
+      $('#protect-ok').hidden = !run.protectHold;
     }
 
     // 「いま何をしているか」を 1 行で
@@ -417,6 +418,9 @@
   $('#sim-toggle').addEventListener('click', () => {
     if (live) return post('api/control', { action: state.run.paused ? 'resume' : 'pause' });
     simTimer ? stopSim() : startSim();
+  });
+  $('#protect-ok').addEventListener('click', () => {
+    if (confirm('保護パスの変更を確認しました（エージェントの書き込みは元に戻した / 自分の編集だった）。今の状態を新しい基準にして再開します。よろしいですか？')) post('api/control', { action: 'protect-ok' });
   });
   $('#unhold').addEventListener('click', () => {
     if (confirm('利用枠のリセットを待たずに再開します（この枠がリセットされるまで再停止しません）。よろしいですか？')) post('api/control', { action: 'unhold' });

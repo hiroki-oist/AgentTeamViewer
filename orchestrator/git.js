@@ -93,7 +93,15 @@ class Repo {
 
   async removeWorktree(wt) {
     await git(this.root, ['worktree', 'remove', '--force', wt.path], { allowFail: true });
-    await git(this.root, ['branch', '-D', wt.branch], { allowFail: true });
+    if (!wt.keep) await git(this.root, ['branch', '-D', wt.branch], { allowFail: true });
+  }
+
+  // 人間待ちで止まった試行の途中の変更を、次の試行の worktree に持ち込む（base は統合ブランチのまま）
+  async carryOver(wt, branch) {
+    const r = await git(wt.path, [...this.identity, 'merge', '--no-ff', '-q', '-m', `atv: carry over ${branch}`, branch], { allowFail: true });
+    if (!r.ok) await git(wt.path, ['merge', '--abort'], { allowFail: true });
+    await git(this.root, ['branch', '-D', branch], { allowFail: true });
+    return r.ok;
   }
 
   async diff(base, paths, maxChars = 40000) {

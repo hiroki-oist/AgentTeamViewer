@@ -33,6 +33,10 @@ const { values: v } = parseArgs({
     'plan-5h-stop': { type: 'string', default: '0.95' },
     'plan-week-share': { type: 'string', default: '0' },
     'plan-probe-min': { type: 'string', default: '15' },
+    protect: { type: 'string', default: '' },
+    bwrap: { type: 'string', default: 'auto' },
+    'burn-warn': { type: 'string', default: '' },
+    'burn-crit': { type: 'string', default: '' },
     'claude-permission-mode': { type: 'string', default: 'acceptEdits' },
     'worker-tools': { type: 'string', default: 'Bash' },
     'codex-sandbox': { type: 'string', default: 'workspace-write' },
@@ -65,6 +69,9 @@ if (v.help || !v.repo || !(v.goal || v['goal-file'])) {
   --plan-5h-stop R        5 時間枠が R を超えたら同様に止める（既定 0.95。0 で無効）
   --plan-week-share R     この run が週の枠を R ぶん（例 0.3 = 30 ポイント）使ったら止める（既定 0 = 無効）
   --plan-probe-min N      エージェントが動いていないとき、N 分ごとに枠を確かめる（既定 15。haiku を 1 回呼ぶ）
+  --protect "<dir>,<dir>" 元の作業ツリーに加えて、エージェントに書かせないディレクトリ（読むのはよい）
+  --bwrap auto|off        auto: bwrap が使えれば保護パスを読み取り専用にして動かす（使えなければ変化の監視だけ）
+  --burn-warn N / --burn-crit N  消費速度の警告 tok/min（既定 同時数 × 25k / × 45k。表示だけで止めはしない）
   --claude-permission-mode acceptEdits|bypassPermissions  worker の権限（既定 acceptEdits = worktree 内の編集を許可）
   --worker-tools "<list>"  worker に追加で許可するツール（既定 "Bash"。例: "Bash(python3:*),Bash(pytest:*)" で絞る）
   --codex-sandbox workspace-write|danger-full-access            worker の sandbox（既定 workspace-write）
@@ -103,8 +110,10 @@ const cfg = {
   planFiveHourStop: num('plan-5h-stop'),
   planWeekShare: num('plan-week-share'),
   planProbeMin: num('plan-probe-min'),
-  burnWarn: 25000,
-  burnCrit: 45000,
+  burnWarn: num('burn-warn') || 25000 * num('max-agents'),
+  burnCrit: num('burn-crit') || 45000 * num('max-agents'),
+  protect: v.protect.split(',').map((x) => x.trim().replace(/^~(?=\/|$)/, process.env.HOME)).filter(Boolean),
+  bwrap: v.bwrap,
   startPaused: v.paused,
   runId: v['run-id'],
   claudePermissionMode: v['claude-permission-mode'],
