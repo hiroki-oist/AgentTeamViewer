@@ -41,12 +41,12 @@ ATV.dummyState = () => ({
       ],
     },
     {
-      id: 'E2', title: 'LIBERO-CTRL コア実装', status: 'running',
+      id: 'E2', title: 'LIBERO-CTRL コア実装', brief: '学習した方策をシミュレータで動かし、成功率を測れるようにする', status: 'running',
       lead: 'lead-E2', risk: { complexity: 0.85, uncertainty: 0.7, blast: 0.8 }, dependsOn: ['E1'],
       tasks: [
-        { id: 'E2-T1', kind: 'coder', title: 'controller policy head', status: 'done', agent: 'w-E2-1', writeSet: ['src/ctrl/head.py'], tokens: 88100,
+        { id: 'E2-T1', kind: 'coder', title: 'controller policy head', brief: '画像と指示から関節の動きを出す部分を作る', headline: '方策が行動を出せるようになった', description: 'src/ctrl/head.py に PolicyHead を実装し、tests/test_head.py で出力の形 (T,7) を確かめる', summary: 'PolicyHead(obs, lang) を src/ctrl/head.py に実装。出力 (T,7)。', status: 'done', agent: 'w-E2-1', writeSet: ['src/ctrl/head.py'], tokens: 88100,
           attempts: [{ model: 'sonnet', effort: 'high', result: 'ok' }] },
-        { id: 'E2-T2', kind: 'coder', title: 'rollout loop / env wrapper', status: 'running', agent: 'w-E2-2', writeSet: ['src/ctrl/rollout.py', 'src/envs/'], tokens: 142300,
+        { id: 'E2-T2', kind: 'coder', title: 'rollout loop / env wrapper', brief: '方策をシミュレータの中で最後まで動かす仕組みを作る', status: 'running', agent: 'w-E2-2', writeSet: ['src/ctrl/rollout.py', 'src/envs/'], tokens: 142300,
           attempts: [{ model: 'sonnet', effort: 'high', result: 'fail', note: '非同期 env で deadlock' }, { model: 'opus', effort: 'high', result: 'running' }] },
         { id: 'E2-T3', kind: 'coder', title: 'config schema (hydra)', status: 'running', agent: 'w-E2-3', writeSet: ['configs/ctrl/', 'src/ctrl/config.py'], tokens: 23500,
           attempts: [{ model: 'haiku', effort: 'medium', result: 'running' }] },

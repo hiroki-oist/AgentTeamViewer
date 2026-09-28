@@ -144,6 +144,11 @@ h2 { font-size: 13px; color: var(--ink-2); display: flex; gap: 8px; align-items:
 .card-head { display: flex; align-items: baseline; gap: 6px; }
 .card-id { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .card-title { font-size: 14px; font-weight: 600; }
+.card-brief { font-size: 11.5px; color: var(--ink-2); margin: 2px 0 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+dialog .brief { font-size: 12.5px; color: var(--ink-2); margin: 2px 0; }
+dialog .headline { font-size: 12.5px; margin: 2px 0; }
+dialog details { margin-top: 4px; }
+dialog details > summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
 .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; font-size: 11px; color: var(--muted); }
 .risk { display: inline-flex; gap: 6px; }
 .risk span { display: inline-flex; align-items: center; gap: 3px; }
@@ -245,3 +250,4 @@ dialog .actions { display: flex; gap: 6px; justify-content: flex-end; margin-bot
   .board { grid-template-columns: 1fr; height: auto; max-height: none; }
   .column { max-height: 60vh; }
 }
+dialog details > summary:focus:not(:focus-visible) { outline: none; }

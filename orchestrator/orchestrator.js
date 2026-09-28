@@ -196,6 +196,7 @@ class Orchestrator extends EventEmitter {
     if (this.cfg.resume && fs.existsSync(this.statePath)) {
       this.restore(JSON.parse(fs.readFileSync(this.statePath, 'utf8')));
       await this.inferNeeds();
+      await this.inferBriefs();
     } else await this.plan();
     this.schedule();
   }
@@ -364,7 +365,7 @@ class Orchestrator extends EventEmitter {
   validatePlan(epics) {
     const ids = new Set(epics.map((e) => e.id));
     const out = epics.map((e) => ({
-      id: String(e.id), title: e.title, status: 'todo', lead: null, review: null, reviewRounds: 0,
+      id: String(e.id), title: e.title, brief: e.brief || '', status: 'todo', lead: null, review: null, reviewRounds: 0,
       risk: normRisk(e.risk),
       dependsOn: (e.dependsOn || []).filter((d) => ids.has(d) && d !== e.id),
       tasks: (e.tasks || []).map((t, i) => this.newTask({ ...t, id: t.id || `${e.id}-T${i + 1}` }, e)),
@@ -445,9 +446,33 @@ class Orchestrator extends EventEmitter {
     this.log('plan', `task 単位の依存: ${tasks.filter(({ t }) => t.status !== 'done').map(({ t }) => `${t.id}←${t.needs?.join('+') || '∅'}`).join(' / ')}`);
   }
 
+  // --resume で読んだ計画に、人が読む 1 行（brief / headline）がなければ root に補わせる
+  async inferBriefs() {
+    const all = this.state.epics.flatMap((e) => e.tasks);
+    if (this.state.epics.every((e) => e.brief) && all.every((t) => t.brief && (t.status !== 'done' || t.headline))) return;
+    const route = policy.judge(this.ladder);
+    const agent = this.rootAgent || this.newAgent('lead', route);
+    this.log('plan', `ボード用の 1 行の説明を補う（${route.model}/${route.effort}）`);
+    const epics = this.state.epics.map((e) => `${e.id} ${e.title}\n${e.tasks.map((t) => `  - ${t.id} [${t.status}] ${t.title} — ${oneLine(t.description, 300)}${t.summary ? ` — result: ${oneLine(t.summary, 300)}` : ''}`).join('\n')}`).join('\n');
+    const res = await this.runAgent(agent, { role: 'planner', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.briefs, prompt: prompts.briefs({ goal: this.cfg.goal, epics }) });
+    if (!res.ok) { this.log('warn', `説明の補完に失敗: ${oneLine(res.error)}`); return; }
+    const eb = new Map((res.output.epics || []).map((x) => [x.id, x.brief]));
+    const tb = new Map((res.output.tasks || []).map((x) => [x.id, x]));
+    for (const e of this.state.epics) {
+      if (!e.brief && eb.get(e.id)) e.brief = eb.get(e.id);
+      for (const t of e.tasks) {
+        const x = tb.get(t.id);
+        if (!x) continue;
+        if (!t.brief && x.brief) t.brief = x.brief;
+        if (!t.headline && x.headline && t.status === 'done') t.headline = x.headline;
+      }
+    }
+    this.changed();
+  }
+
   newTask(t, epic) {
     return {
-      id: String(t.id), title: t.title, description: t.description || '', status: 'todo', agent: null,
+      id: String(t.id), title: t.title, brief: t.brief || '', headline: t.headline || '', description: t.description || '', status: 'todo', agent: null,
       kind: this.kindName(t.kind),
       writeSet: [...new Set((t.writeSet || []).map(normPath).filter(Boolean))],
       risk: t.risk ? normRisk(t.risk) : normRisk(epic.risk),
@@ -587,13 +612,14 @@ class Orchestrator extends EventEmitter {
         if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
         // blocked なのに依頼がないと、誰も何もできずに止まる。要約をそのまま依頼にする
         if (!blocking.length) {
-          blocking.push(...this.addRequests([{ kind: 'decision', blocking: true, title: `${t.id} が止まった理由を確認してほしい`,
+          blocking.push(...this.addRequests([{ kind: 'decision', blocking: true, title: `${t.id}「${t.title}」が止まった: ${out.headline || '理由を確認してほしい'}`,
             detail: `${out.summary || '(要約なし)'}\n\n指示を返信すると、それを添えて再開します。「却下」なら別の進め方で再開します。${t.carryBranch ? `\n途中の変更はブランチ ${t.carryBranch} に残してあり、次の試行に持ち込みます。` : ''}` }],
           { from: t.agent, taskId: t.id, epicId: e.id }));
         }
         finish('blocked', out.summary);
+        attempt.headline = out.headline || '';
         t.status = 'blocked';
-        this.log('request', `${t.id} は人間待ち: ${blocking.map((r) => r.title).join(' / ') || out.summary}`);
+        this.log('request', `${t.id} は人間待ち: ${blocking.map((r) => r.title).join(' / ') || out.headline || oneLine(out.summary)}`);
         return;
       }
       if (out.status === 'gave_up') throw new Failure(`エージェントが断念: ${out.summary}`);
@@ -617,11 +643,12 @@ class Orchestrator extends EventEmitter {
 
       finish('ok');
       t.summary = out.summary;
+      t.headline = out.headline || '';
       t.changed = changed;
       t.artifacts = made;
       t.status = 'done';
       this.state.agents[t.agent].state = 'finished';
-      this.log('done', `${t.id} 完了（${changed.length} ファイル）。ロック解放。${oneLine(out.summary)}`);
+      this.log('done', `${t.id} 完了: ${out.headline || oneLine(out.summary)}`);
     } catch (err) {
       // オーケストレータの停止・再起動で中断されたなら、失敗に数えず途中の変更を次の試行に持ち込む
       if (this.shuttingDown) {

@@ -30,6 +30,8 @@
   const fmtK = watchdog.fmtK;
   const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : fmtK(n));
   const hhmm = (d) => d.toTimeString().slice(0, 5);
+  const oneLine = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
+  const RESULT_LABEL = { ok: '成功', fail: '失敗', blocked: '人間待ち', interrupted: '中断', running: '実行中' };
   const mdhm = (d) => `${d.getMonth() + 1}/${d.getDate()} ${hhmm(d)}`;
   // 残り時間を短く: 45分 / 13時間20分 / 2日5時間
   const fmtDur = (min) => {
@@ -203,7 +205,7 @@
           const act = (t.status === 'running' || t.status === 'critique') && t.activity ? `<span class="activity" title="${esc(t.activity)}">${esc(t.activity)}</span>` : '';
           return `<li class="task ${t.status}">
               <span class="st" title="${t.status}">${TASK_ICON[t.status] || '○'}</span>
-              <span class="t-title" title="${esc(t.title)}">${t.kind ? `<span class="kind" title="${esc(state.kinds?.[t.kind]?.description || t.kind)}">${esc(t.kind)}</span>` : ''}${esc(t.id)} ${esc(t.title)}</span>
+              <span class="t-title" title="${esc(t.headline || t.brief || t.title)}">${t.kind ? `<span class="kind" title="${esc(state.kinds?.[t.kind]?.description || t.kind)}">${esc(t.kind)}</span>` : ''}${esc(t.id)} ${esc(t.title)}</span>
               <span class="t-sub">${chip(t.agent)}${files}${waits}${blocked}${escl}${crit}</span>
               ${act}
             </li>`;
@@ -211,6 +213,7 @@
         const cls = [pendingDeps.length && 'blocked-deps', e.tasks.some((t) => t.status === 'failed') && 'has-failed', e.tasks.some((t) => t.status === 'blocked') && 'has-blocked'].filter(Boolean).join(' ');
         return `<article class="card ${cls}" data-epic="${esc(e.id)}">
             <div class="card-head"><span class="card-id">${esc(e.id)}</span><span class="card-title">${esc(e.title)}</span></div>
+            ${e.brief ? `<div class="card-brief">${esc(e.brief)}</div>` : ''}
             <div class="card-meta">
               <span>リード</span>${chip(e.lead)}
               <span class="risk" title="complexity / uncertainty / blast radius">
@@ -290,10 +293,16 @@
     const r = route(e.risk);
     const rows = e.tasks.map((t) => `<tr>
         <td>${esc(t.id)}${t.kind ? `<br><span class="kind">${esc(t.kind)}</span>` : ''}</td>
-        <td><b>${esc(t.title)}</b>${t.needs?.length ? `<div class="muted">前提: ${esc(t.needs.join(', '))}</div>` : ''}${t.grants?.length ? `<div class="desc">追加で許可: ${esc(t.grants.join(', '))}</div>` : ''}${t.description ? `<div class="desc">${esc(t.description)}</div>` : ''}${t.summary ? `<div class="desc">→ ${esc(t.summary)}</div>` : ''}</td>
+        <td><b>${esc(t.title)}</b>${t.brief ? `<div class="brief">${esc(t.brief)}</div>` : ''}
+          ${t.headline ? `<div class="headline">→ ${esc(t.headline)}</div>` : ''}
+          ${t.needs?.length ? `<div class="muted">前提: ${esc(t.needs.join(', '))}</div>` : ''}
+          ${t.description || t.summary || t.grants?.length ? `<details><summary>エージェント向けの詳細</summary>
+            ${t.description ? `<div class="desc"><b>やること:</b> ${esc(t.description)}</div>` : ''}
+            ${t.summary ? `<div class="desc"><b>結果:</b> ${esc(t.summary)}</div>` : ''}
+            ${t.grants?.length ? `<div class="desc">追加で許可: ${esc(t.grants.join(', '))}</div>` : ''}</details>` : ''}</td>
         <td>${t.status}${t.status === 'failed' && live ? `<br><button class="btn" data-retry="${esc(t.id)}">再試行</button>` : ''}</td><td>${chip(t.agent)}</td>
         <td>${t.writeSet.map((f) => `<span class="file">${esc(f)}</span>`).join(' ') || '<span class="muted">読み取りのみ</span>'}</td>
-        <td>${t.attempts.map((a, i) => `<div class="att">#${i + 1} ${esc(a.model)}/${esc(a.effort)}: <b>${a.result}</b>${a.note ? ` <span class="muted">${esc(a.note.slice(0, 600))}</span>` : ''}</div>`).join('') || '—'}
+        <td>${t.attempts.map((a, i) => `<div class="att">#${i + 1} <b>${RESULT_LABEL[a.result] || esc(a.result)}</b> <span class="muted">${esc(a.model)}/${esc(a.effort)}</span>${a.headline ? ` — ${esc(a.headline)}` : ''}${a.note ? `<details><summary>${esc(oneLine(a.note, 70))}</summary><div class="desc">${esc(a.note)}</div></details>` : ''}</div>`).join('') || '—'}
           ${(t.critiques || []).map((c) => `<div class="critique"><b>⚔ critic ${esc(c.model)}/${esc(c.effort)} → ${CRITIC_VERDICT[c.verdict] || esc(c.verdict)}</b>
             <div>${esc(c.diagnosis)}</div>
             ${c.flawedAssumptions?.length ? `<div class="muted">誤った前提: ${esc(c.flawedAssumptions.join(' / '))}</div>` : ''}
@@ -304,6 +313,7 @@
     $('#detail-body').innerHTML = `
       <span class="eyebrow">${esc(e.id)} · ${e.status}</span>
       <h3>${esc(e.title)}</h3>
+      ${e.brief ? `<p class="brief">${esc(e.brief)}</p>` : ''}
       <p class="muted">リスク score = 0.5·C + 0.3·U + 0.2·B = <b>${riskScore(e.risk).toFixed(2)}</b>
         → 初期ルーティング <b>${r.model}/${r.effort}</b>（失敗ごとに 1 段昇格）。依存: ${esc(e.dependsOn.join(', ')) || 'なし'}</p>
       ${e.review ? `<p class="desc">レビュー: ${esc(e.review.note)}</p>` : e.lastReviewNote ? `<p class="desc">前回レビュー: ${esc(e.lastReviewNote)}</p>` : ''}

@@ -23,8 +23,8 @@ const SCHEMAS = {
     epics: {
       type: 'array',
       items: obj({
-        id: str, title: str, dependsOn: strs, risk,
-        tasks: { type: 'array', items: obj({ id: str, title: str, description: str, kind: str, writeSet: strs, needs: strs, risk }) },
+        id: str, title: str, brief: str, dependsOn: strs, risk,
+        tasks: { type: 'array', items: obj({ id: str, title: str, brief: str, description: str, kind: str, writeSet: strs, needs: strs, risk }) },
       }),
     },
     newKinds: {
@@ -35,8 +35,14 @@ const SCHEMAS = {
   }),
   // 既存の計画に task 単位の依存を補う（--resume で古い計画を読んだとき）
   needs: obj({ tasks: { type: 'array', items: obj({ id: str, needs: strs, reason: str }) } }),
+  // 既存の計画に、人が読む 1 行（brief / headline）を補う（--resume で古い計画を読んだとき）
+  briefs: obj({
+    epics: { type: 'array', items: obj({ id: str, brief: str }) },
+    tasks: { type: 'array', items: obj({ id: str, brief: str, headline: str }) },
+  }),
   work: obj({
     status: { type: 'string', enum: ['done', 'blocked', 'gave_up'] },
+    headline: str,
     summary: str,
     humanRequests: { type: 'array', items: humanRequest },
   }),
@@ -59,6 +65,9 @@ const SCHEMAS = {
 
 const LANG = 'Write every human-facing text field (titles, summaries, notes, request details) in Japanese.';
 
+// ボードは人との情報共有の場。人が一目で読む欄と、エージェント向けの詳しい欄を分ける
+const HUMAN = `Fields a person reads at a glance on the shared board (title, brief, headline, note, request title) must be plain language for someone who has not read the code: say what and why (or what happened), not how. No file paths, function or variable names, flags, or step-by-step details there — those go in description / summary / detail, which only agents and curious humans open. One sentence; brief and headline about 40 Japanese characters, title about 20.`;
+
 const REQUESTS_RULE = `If you are blocked by something only the human can do (install an app or system package, log in / grant an API key or OAuth, grant access to a resource, make a product decision), do NOT work around it silently: add an entry to humanRequests with concrete steps for the human (exact command, URL, env var name). Set blocking=true only if you cannot finish without it. Never ask for secrets to be pasted into the chat; ask the human to put them in an env var or a local file and tell you the name.`;
 
 function plan({ goal, checkCommand, maxTasks, catalog }) {
@@ -75,7 +84,8 @@ Rules:
 - ids: epics "E1", "E2", …; tasks "<epicId>-T1", "<epicId>-T2", …. dependsOn lists epic ids only, no cycles.
 - needs: for each task, the ids of the tasks (in any epic) whose merged result it actually requires — nothing more. A task starts as soon as its needs are done, even if the rest of an upstream epic is still running, so keep needs minimal and precise; this is what lets independent work run in parallel. dependsOn stays as the coarse epic-level summary.
 - writeSet: every repo-relative path the task may create or modify. A path ending in "/" means the whole directory. Tasks that run in parallel should not overlap; overlapping tasks will be serialized by file locks. Use [] for read-only investigation tasks. For types that produce files to be looked at (illustrator, blender, …), give a directory (e.g. "assets/icons/") so they can save side files such as prompts or preview renders next to the result.
-- description: what "done" means, precisely, including how to verify it. Workers only see their own task, the goal, and short summaries of finished tasks.
+- title / brief: for the person watching the board. title = a short name of the work; brief = one plain sentence on what this produces and why it matters for the goal (epics get a brief too).
+- description: for the worker agent: what "done" means, precisely, including how to verify it. Workers only see their own task, the goal, and short summaries of finished tasks.
 - risk (0..1 each): complexity, uncertainty (how likely the first attempt is wrong), blast (how much breaks if it is wrong). This decides which model runs the task: be honest, low risk means a cheap model.
 - checkCommand: one shell command that verifies the repo (tests/lint), run in a fresh checkout after every task. ${checkCommand ? `The human already chose: ${JSON.stringify(checkCommand)} — return it unchanged.` : 'Use "" if there is nothing reliable to run.'}
 - successCriteria: 2-4 measurable criteria for the whole goal.
@@ -102,7 +112,9 @@ Changes outside this list are rejected automatically and the attempt is counted 
 ${context ? `\nFinished work you can rely on:\n${context}\n` : ''}${previous ? `\nA previous attempt at this task failed. Evidence:\n${previous}\nFix the cause instead of repeating the same approach.\n` : ''}${replies ? `\nThe human answered earlier requests:\n${replies}\n` : ''}${critique ? `\nA critic reviewed the repeated failures of this task. Its diagnosis and guidance:\n${critique}\nFollow the guidance. If you find concrete evidence that it is wrong, do what the evidence says and explain it in summary.\n` : ''}
 Be economical: read only what you need, and run the smallest check that proves the task works. You do not need to commit; the orchestrator commits and merges for you.
 Finish with status "done" when the task is complete and verified, "blocked" if you need the human (see below), or "gave_up" if the task as written is impossible (explain why in summary).
-summary: 1-3 sentences on what you did and anything later tasks must know.
+headline: one plain sentence for the person watching the board — what is now possible or what is in the way (e.g. 「デモ 500 本を動作ごとに区切れるようになった」「Taketomi への同期はできたが、速度の計測がまだ」).
+summary: 1-3 sentences for later agents: what you did, where it is, and anything they must know (paths and names are fine here).
+${HUMAN}
 ${REQUESTS_RULE}
 ${LANG}`;
 }
@@ -133,7 +145,8 @@ verdict:
 - "task_is_wrong": the task definition itself causes the failures (wrong scope, wrong writeSet, impossible "done" condition). revisedTask = the corrected task (keep writeSet minimal; repo-relative, "/" suffix for directories). guidance = how to do the revised task.
 - "needs_human": only the human can unblock it (missing credentials/hardware/data, an unclear requirement). Put the concrete ask in humanRequests with blocking=true.
 For verdicts other than "task_is_wrong", return revisedTask with empty strings and []. revisedTask.kind = "" keeps the current type.
-diagnosis: 2-4 sentences. flawedAssumptions / unansweredQuestions: short items, [] if none.
+diagnosis: 2-4 sentences; start with one plain sentence a person can read alone. flawedAssumptions / unansweredQuestions: short items, [] if none.
+${HUMAN}
 ${REQUESTS_RULE}
 ${LANG}`;
 }
@@ -154,7 +167,8 @@ DIFF:
 ${diff.patch || '(empty)'}
 
 Decide accept or reject. Reject only for real defects against the epic's intent (bugs, missing pieces, broken behavior) — not for style. On reject, list the fixes as small tasks with a precise description and writeSet (repo-relative paths, "/" suffix for directories).
-note: 1-3 sentences for the human.
+note: 1-2 plain sentences for the human: is the epic's result usable, and what is left if not. Fix titles follow the same rule as task titles.
+${HUMAN}
 ${REQUESTS_RULE}
 ${LANG}`;
 }
@@ -173,4 +187,20 @@ For every task that is not done, return needs = the ids of the tasks whose merge
 ${LANG}`;
 }
 
-module.exports = { SCHEMAS, prompts: { plan, work, critique, review, needs } };
+// 計画はあるが、人が読む 1 行（brief）や完了 task の headline がないとき、それだけを補わせる
+function briefs({ goal, epics }) {
+  return `You are the root orchestrator of an autonomous agent team. The plan below already exists and must not change. Write only the one-line texts a person reads on the shared board.
+
+GOAL:
+${goal}
+
+PLAN (epic, then its tasks: id [status] title — description — result summary):
+${epics}
+
+For every epic: brief = one plain sentence on what the epic produces and why it matters for the goal.
+For every task: brief = one plain sentence on what the task produces and why. For finished tasks also headline = one plain sentence on what is now possible (from its result summary); "" for unfinished tasks.
+${HUMAN}
+${LANG}`;
+}
+
+module.exports = { SCHEMAS, HUMAN, prompts: { plan, work, critique, review, needs, briefs } };
