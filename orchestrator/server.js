@@ -2,7 +2,7 @@
 //   GET  /             … ボード（index.html ほか静的ファイル）
 //   GET  /api/state    … 現在の状態 JSON
 //   GET  /api/events   … Server-Sent Events。状態が変わるたびに全体を送る（250ms で間引き）
-//   POST /api/control  … {action: pause|resume|unfreeze|unhold|protect-ok|restart|retry|approve, taskId?, epicId?}
+//   POST /api/control  … {action: pause|resume|unfreeze|unhold|protect-ok|restart|report|retry|approve, taskId?, epicId?}
 //   POST /api/requests/:id … {reply?, dismiss?} 人間への依頼に返答する
 // 127.0.0.1 のみで待ち受ける（認証なしのため外に出さない）。
 const http = require('node:http');
@@ -37,6 +37,12 @@ function serve(orch, { port, host = '127.0.0.1' }) {
     const url = new URL(req.url, 'http://x');
     try {
       if (url.pathname === '/api/state') return json(res, 200, orch.state);
+      if (url.pathname === '/api/report') {
+        const p = orch.state.run.report?.path;
+        if (!p || !fs.existsSync(p)) return json(res, 404, { error: 'まだ報告書がない' });
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-cache' });
+        return fs.createReadStream(p).pipe(res);
+      }
       if (url.pathname === '/api/events') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
         res.write(`data: ${JSON.stringify(orch.state)}\n\n`);

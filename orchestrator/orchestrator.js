@@ -478,6 +478,51 @@ class Orchestrator extends EventEmitter {
     this.changed();
   }
 
+  // ---------- プロジェクト報告書 ----------
+  // 記録（task ごとの意図・試行・結果・批判・レビュー・人間の返答）を時刻順に並べ、root に Markdown で書かせる
+  reportRecord() {
+    const ev = [];
+    const at = (iso) => (iso ? new Date(iso).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '?');
+    for (const e of this.state.epics) {
+      for (const t of e.tasks) {
+        const first = t.attempts[0];
+        if (!first) continue;
+        ev.push({ t: first.startedAt, s: `[${at(first.startedAt)}] 開始 ${t.id}「${t.title}」（${e.title}）\n  意図: ${t.brief || ''}\n  やること: ${oneLine(t.description, 700)}` });
+        t.attempts.forEach((a, i) => {
+          ev.push({ t: a.endedAt || a.startedAt, s: `[${at(a.endedAt || a.startedAt)}] ${t.id} 試行${i + 1}（${a.model}/${a.effort}）→ ${a.result}${a.headline ? `: ${a.headline}` : ''}${a.note ? `\n  記録: ${oneLine(a.note, 700)}` : ''}${a.progress?.steps?.length ? `\n  手順: ${a.progress.steps.map((x) => `${x.done ? '✓' : '・'}${x.title}`).join(' / ')}` : ''}` });
+        });
+        for (const c of t.critiques || []) ev.push({ t: c.at, s: `[${at(c.at)}] ${t.id} 失敗が続いたため critic が検討: ${oneLine(c.diagnosis, 500)}\n  次の進め方: ${oneLine(c.guidance, 500)}` });
+        if (t.status === 'done') ev.push({ t: t.attempts[t.attempts.length - 1].endedAt, s: `[${at(t.attempts[t.attempts.length - 1].endedAt)}] 完了 ${t.id}: ${t.headline || ''}\n  結果: ${oneLine(t.summary, 900)}` });
+        else ev.push({ t: new Date().toISOString(), s: `[未完了] ${t.id}「${t.title}」: 状態 ${t.status}` });
+      }
+      if (e.lastReviewNote) ev.push({ t: e.tasks.map((t) => t.attempts[t.attempts.length - 1]?.endedAt).filter(Boolean).sort().pop(), s: `[${e.id} レビュー] ${e.title}: ${oneLine(e.lastReviewNote, 600)}` });
+    }
+    for (const r of this.state.requests) ev.push({ t: r.createdAt, s: `[${at(r.createdAt)}] 人間への依頼「${r.title}」${r.status !== 'open' ? ` → ${r.status === 'dismissed' ? '却下' : `返答: ${oneLine(r.reply || '対応済み', 400)}`}` : '（未対応）'}` });
+    return ev.filter((x) => x.t).sort((a, b) => String(a.t).localeCompare(String(b.t))).map((x) => x.s).join('\n');
+  }
+
+  async writeReport(partial) {
+    if (this.reporting) return;
+    this.reporting = true;
+    const run = this.state.run, w = this.state.watchdog;
+    try {
+      const route = policy.judge(this.ladder);
+      const agent = this.newAgent('lead', route);
+      this.log('report', `プロジェクト報告書を作成中（${route.model}/${route.effort}${partial ? '、途中までの分' : ''}）`);
+      const usage = `${w.usedTokens} tokens, $${w.usedCostUsd.toFixed(2)} (API 換算), 開始 ${run.startedAt}`;
+      const res = await this.runAgent(agent, {
+        role: 'planner', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.report,
+        prompt: prompts.report({ goal: this.cfg.goal, criteria: (this.state.project.successCriteria || []).map((c) => `- ${c}`).join('\n'), record: this.reportRecord(), usage, partial }),
+      });
+      this.state.agents[agent].state = 'finished';
+      if (!res.ok) { this.log('fail', `報告書の作成に失敗: ${oneLine(res.error)}`); return; }
+      const file = path.join(this.repo.dir, 'report.md');
+      fs.writeFileSync(file, res.output.markdown.trim() + '\n');
+      run.report = { path: file, at: new Date().toISOString(), partial };
+      this.log('report', `報告書を書いた: ${file}`);
+    } finally { this.reporting = false; this.changed(); }
+  }
+
   newTask(t, epic) {
     return {
       id: String(t.id), title: t.title, brief: t.brief || '', headline: t.headline || '', description: t.description || '', status: 'todo', agent: null,
@@ -548,6 +593,7 @@ class Orchestrator extends EventEmitter {
       run.status = next;
       const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, 'protect-hold': '保護パスの変更を検知して停止中（依頼パネルを確認）', paused: '一時停止中', running: '実行中' }[next];
       this.log(next === 'done' ? 'done' : 'watchdog', msg);
+      if (next === 'done' && !run.report) this.writeReport(false);
     }
     this.lastWatchdog = wd;
     this.changed();
@@ -913,6 +959,9 @@ class Orchestrator extends EventEmitter {
       run.status = 'restarting';
       this.log('control', mode === 'drain' ? '再起動を準備中: 新規 spawn を止め、実行中の agent の完了を待つ' : '今すぐ再起動: 実行中の agent を中断する');
       this.emit('restart', { mode });
+      return;
+    } else if (action === 'report') {
+      this.writeReport(this.state.run.status !== 'done');
       return;
     } else if (action === 'protect-ok') {
       if (!run.protectHold) throw new Error('保護パスで止まっていない');

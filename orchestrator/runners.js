@@ -161,6 +161,7 @@ async function mock(opts) {
   if (opts.signal?.aborted) return { ok: false, tokens, costUsd: 0, error: '中断' };
   const costUsd = tokens * 5e-6;
 
+  if (opts.schema?.properties?.markdown) return { ok: true, tokens, costUsd, output: { markdown: `# (mock) 報告書\n\n${opts.prompt.slice(opts.prompt.indexOf('RECORD'), opts.prompt.indexOf('USAGE'))}` } };
   if (opts.role === 'planner') return { ok: true, tokens, costUsd, output: MOCK_PLAN };
   if (opts.role === 'critic') {
     return { ok: true, tokens, costUsd, output: {

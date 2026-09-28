@@ -108,7 +108,7 @@ run が終わったら、root が作った型（`.atv/<runId>/kinds/*.md`）を�
 - **atv を更新した / 様子がおかしい**: `{"action":"restart","mode":"drain"}`（実行中の agent の完了を待つ。急ぐなら `"now"`）で、最新版のコードが同じ設定と状態で立ち上がる。プロセスが落ちていたら `atv --repo <repo> --run-id <runId> --resume`（`nohup` で切り離す。設定は `.atv/<runId>/config.json` から読む）
 - **予算で止まった**（`run.frozen`）: 使用量を見せる。ユーザーが広げると決めたら `{"action":"unfreeze"}`（予算が 1.5 倍になる）
 - **一時停止 / 再開**: `{"action":"pause"}` / `{"action":"resume"}`
-- **完了**（`run.status: "done"`）: `git log --graph --oneline <run.branch>` と `git diff HEAD...<run.branch> --stat` を見せ、中身を確認してからマージするよう勧める。マージはユーザーが指示したときだけ行う
+- **完了**（`run.status: "done"`）: 報告書が `.atv/<runId>/report.md` に自動で書かれる（`run.report.path`。途中の分は `{"action":"report"}`）。要点を伝えてから、`git log --graph --oneline <run.branch>` と `git diff HEAD...<run.branch> --stat` を見せ、中身を確認してからマージするよう勧める。マージはユーザーが指示したときだけ行う
 
 ## 停止と片付け
 

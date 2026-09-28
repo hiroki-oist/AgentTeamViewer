@@ -153,6 +153,10 @@
       $('#unfreeze').hidden = !run.frozen;
       $('#unhold').hidden = !run.planHold;
       $('#protect-ok').hidden = !run.protectHold;
+      $('#report-link').hidden = !run.report;
+      $('#report-link').title = run.report ? `${run.report.partial ? '途中までの' : ''}報告書（${new Date(run.report.at).toLocaleString('ja-JP')}）` : '';
+      $('#report-make').textContent = run.report ? '📄 作り直す' : '📄 報告書を作る';
+      $('#report-make').hidden = !live;
     }
 
     // 「いま何をしているか」を 1 行で
@@ -527,6 +531,10 @@
   };
   watchEl.addEventListener('click', (ev) => { if (!ev.target.closest('button, a, input')) setExpanded(!watchEl.classList.contains('expanded')); });
   document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') setExpanded(false); });
+  $('#report-make').addEventListener('click', () => {
+    if (!live) return;
+    if (confirm('ここまでにやったことを報告書（Markdown）にまとめます。root が 1 回動きます。よろしいですか？')) post('api/control', { action: 'report' });
+  });
   $('#restart').addEventListener('click', () => {
     if (!live) return;
     if (confirm('最新版のコードで、設定と状態を引き継いで再起動します。\n実行中のエージェントが終わるのを待ってから再起動しますか？\n（キャンセルすると「今すぐ中断して再起動」を選べます）')) post('api/control', { action: 'restart', mode: 'drain' });

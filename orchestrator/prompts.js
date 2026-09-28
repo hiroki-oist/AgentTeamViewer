@@ -35,6 +35,7 @@ const SCHEMAS = {
   }),
   // 既存の計画に task 単位の依存を補う（--resume で古い計画を読んだとき）
   needs: obj({ tasks: { type: 'array', items: obj({ id: str, needs: strs, reason: str }) } }),
+  report: obj({ markdown: str }),
   // 既存の計画に、人が読む 1 行（brief / headline）を補う（--resume で古い計画を読んだとき）
   briefs: obj({
     epics: { type: 'array', items: obj({ id: str, brief: str }) },
@@ -204,4 +205,28 @@ ${HUMAN}
 ${LANG}`;
 }
 
-module.exports = { SCHEMAS, HUMAN, prompts: { plan, work, critique, review, needs, briefs } };
+// プロジェクト報告書（Markdown）。やったことを時系列で淡々と並べる
+function report({ goal, criteria, record, usage, partial }) {
+  return `You write the project report for an autonomous agent team${partial ? ' (the project is still in progress; report what has happened so far)' : ''}. This checkout has all accepted work merged (read-only for you). Read the result files that the record points to (e.g. results/*.csv, results/SUMMARY.md, docs/) so that every number you write comes from a file or from the record below.
+
+GOAL:
+${goal}
+
+SUCCESS CRITERIA:
+${criteria || '(none)'}
+
+RECORD (chronological; what each task set out to do, what each attempt did and produced, reviewer notes, critic guidance, the human's answers):
+${record}
+
+USAGE: ${usage}
+
+Write the report as Markdown in "markdown". It is a plain factual log of what was done, in order:
+- For each step of the work: what was done, with what intent, what the result was (numbers and file locations where they exist), and what was done next because of that result. Chain the steps so the reader can follow why each thing happened.
+- Group by phase of the work in chronological order (use the epics as a guide, but follow the actual order of events). Include failed attempts and changes of approach as plain events ("X was tried; it produced Y; so Z was done instead"), with their concrete cause.
+- Do NOT evaluate or judge (no "successful", "impressive", "unfortunately", no grading against the criteria), do NOT excuse or explain away, and do NOT add sections such as "rejected hypotheses", "lessons learned", "limitations" or "future work". Do not speculate beyond the record.
+- Start with a short header: goal (one line), period, and where the outputs are (integration branch, main result files). End with a factual list of the final outputs (files and what each contains) and, if unfinished, the tasks that remain and their state.
+- Plain Japanese, short sentences, the reader has not read the code. Paths and numbers are fine; avoid internal agent jargon (writeSet, epic ids alone) unless you explain it in words.
+${LANG}`;
+}
+
+module.exports = { SCHEMAS, HUMAN, prompts: { plan, work, critique, review, needs, briefs, report } };
