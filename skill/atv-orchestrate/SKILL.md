@@ -30,6 +30,7 @@ description: いま開いている repo で、Agent Team Viewer のオーケス�
 4. **検証コマンド**: 各 task の後に新しい worktree で走らせる 1 行のコマンド。候補を出し、合意したら**その場で一度実行して、今の状態で通るか（または期待どおりに落ちるか）と所要時間を確かめる**。worktree には `.gitignore` 対象（`node_modules`、`.venv`、データ、`.env`）がないので、それらに依存するなら、コマンドの中で用意するか絶対パスで参照する形に直す。速いテストがないなら「なし」でもよい（その場合はレビューが唯一の検証になると伝える）
 5. **予算と進め方**: 次の既定値を示し、変えたいところだけ聞く
    - `--budget-usd 30` / `--budget-tokens 3000000`（90% で新規 spawn を停止）
+   - プランの利用枠: `--plan-week-stop 0.9` / `--plan-5h-stop 0.95`（超えたら止めてリセット時刻に自動再開）、`--plan-week-share 0`（この run が週の枠を使ってよいポイント。0 で無効）。相談の前に `claude -p "ok" --model haiku --output-format stream-json --verbose` の `rate_limit_event` で今の使用率とリセット時刻を測って見せ、それを元に決める
    - `--per-call-usd 5`（claude 1 回あたりの上限）
    - `--ladder claude`（`codex` / `mixed` も可。上の 3 で見つけた runner に合わせる）
    - `--max-agents 4`、`--max-attempts 4`、`--max-tasks 20`
@@ -98,6 +99,7 @@ nohup atv --repo "$ROOT" --goal-file "$ROOT/.atv/goals/$RUN.md" --run-id "$RUN" 
 - **なぜ詰まっているか**: `status: "critique"` の task は critic が検証中。`critiques[]` に critic の結果（`verdict`、`diagnosis`、`flawedAssumptions`、`unansweredQuestions`、`guidance`）があるので、それを要約して伝える。critic の診断に納得できないとユーザーが言ったら、その理由を依頼への返答か goal ファイルの補足として渡す
 - **失敗した task**（`status: "failed"`）: その task の `attempts[].note` と `critiques[]` を読んで原因を説明する。再試行させるなら `{"action":"retry","taskId":"<id>"}`
 - **差し戻しの上限で止まった epic**（`review.verdict: "needs-human"`）: レビューの note を説明する。ユーザーが承認するなら `{"action":"approve","epicId":"<id>"}`
+- **利用枠で止まった**（`run.planHold`、status `plan-limit`）: `watchdog.plan` の使用率とリセット時刻を見せる。リセット時刻に自動で再開する。待たずに続けるとユーザーが決めたら `{"action":"unhold"}`
 - **予算で止まった**（`run.frozen`）: 使用量を見せる。ユーザーが広げると決めたら `{"action":"unfreeze"}`（予算が 1.5 倍になる）
 - **一時停止 / 再開**: `{"action":"pause"}` / `{"action":"resume"}`
 - **完了**（`run.status: "done"`）: `git log --graph --oneline <run.branch>` と `git diff HEAD...<run.branch> --stat` を見せ、中身を確認してからマージするよう勧める。マージはユーザーが指示したときだけ行う

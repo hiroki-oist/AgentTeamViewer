@@ -1,7 +1,8 @@
 // エージェント実行のアダプタ。どの runner も同じ形で呼べる:
-//   run({ role, cwd, prompt, schema, model, effort, readOnly, maxBudgetUsd, task, onUsage, onActivity, signal })
+//   run({ role, cwd, prompt, schema, model, effort, readOnly, maxBudgetUsd, task, onUsage, onActivity, onRateLimit, signal })
 //     → { ok, output, tokens, costUsd, error }
 // onUsage(tokensSoFar) は途中経過（累計）、onActivity(text) は「いま何をしているか」の 1 行。
+// onRateLimit(info) はプランの利用枠（5 時間枠・週の枠の使用率）。claude だけが返す。
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -66,7 +67,8 @@ async function claude(opts, cfg) {
           if (b.type === 'tool_use' && b.name !== 'StructuredOutput') opts.onActivity?.(describeTool(b));
           else if (b.type === 'text' && b.text.trim()) opts.onActivity?.(oneLine(b.text));
         }
-      } else if (ev.type === 'result') final = ev;
+      } else if (ev.type === 'rate_limit_event') opts.onRateLimit?.(ev.rate_limit_info);
+      else if (ev.type === 'result') final = ev;
     },
   });
 
@@ -82,6 +84,16 @@ async function claude(opts, cfg) {
 }
 
 const sum = (m) => [...m.values()].reduce((a, b) => a + b, 0);
+
+// プランの利用枠だけを知りたいときの最小の呼び出し（haiku に 1 語返させる。数セント）
+async function probeRateLimit(cfg) {
+  let info = null;
+  await runJsonl(cfg.claudeBin, ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--model', 'haiku', '--max-budget-usd', '0.10'], {
+    cwd: os.tmpdir(), input: 'Reply with just: ok',
+    onLine: (ev) => { if (ev.type === 'rate_limit_event') info = ev.rate_limit_info; },
+  });
+  return info;
+}
 
 // ---------- Codex (codex exec) ----------
 async function codex(opts, cfg) {
@@ -198,4 +210,4 @@ const MOCK_PLAN = {
   humanRequests: [{ kind: 'decision', title: 'ライセンスを決めてほしい', detail: 'MIT / Apache-2.0 のどちらにするか返信してください', blocking: false }],
 };
 
-module.exports = { claude, codex, mock };
+module.exports = { claude, codex, mock, probeRateLimit };

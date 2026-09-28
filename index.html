@@ -16,6 +16,7 @@
         <h1 id="proj-name"></h1>
         <div class="controls">
           <button id="unfreeze" class="btn" type="button" hidden>予算を 1.5 倍にして再開</button>
+          <button id="unhold" class="btn" type="button" hidden>枠を無視して続ける</button>
           <button id="sim-toggle" class="btn" type="button">▶ シミュレーション</button>
           <button id="theme-toggle" class="btn ghost" type="button" aria-label="テーマ切替">◐</button>
         </div>
@@ -55,6 +56,16 @@
         <div class="stat">
           <span class="stat-label">予算枯渇予測</span>
           <span class="stat-value" id="w-eta"></span>
+        </div>
+        <div class="stat" id="w-plan5-wrap" hidden>
+          <span class="stat-label">5 時間枠</span>
+          <span class="stat-value" id="w-plan5"></span>
+          <div class="meter small"><div class="meter-fill" id="w-plan5-bar"></div></div>
+        </div>
+        <div class="stat" id="w-plan7-wrap" hidden>
+          <span class="stat-label">週の枠</span>
+          <span class="stat-value" id="w-plan7"></span>
+          <div class="meter small"><div class="meter-fill" id="w-plan7-bar"></div></div>
         </div>
       </div>
       <div class="spark-wrap">

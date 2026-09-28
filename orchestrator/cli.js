@@ -28,6 +28,11 @@ const { values: v } = parseArgs({
     'max-tasks': { type: 'string', default: '20' },
     'max-review-rounds': { type: 'string', default: '2' },
     'check-timeout': { type: 'string', default: '1200' },
+    'plan-week-warn': { type: 'string', default: '0.8' },
+    'plan-week-stop': { type: 'string', default: '0.9' },
+    'plan-5h-stop': { type: 'string', default: '0.95' },
+    'plan-week-share': { type: 'string', default: '0' },
+    'plan-probe-min': { type: 'string', default: '15' },
     'claude-permission-mode': { type: 'string', default: 'acceptEdits' },
     'worker-tools': { type: 'string', default: 'Bash' },
     'codex-sandbox': { type: 'string', default: 'workspace-write' },
@@ -55,6 +60,11 @@ if (v.help || !v.repo || !(v.goal || v['goal-file'])) {
   --max-agents N          同時稼働数（既定 4）
   --max-attempts N        task ごとの試行上限（既定 4。失敗ごとに梯子を 1 段上げる）
   --critic-after N        N 回失敗した task に critic（批判的レビュー）を立てる（既定 2。0 で無効）
+  --plan-week-warn R      プランの週の枠の使用率が R を超えたら警告（既定 0.8）
+  --plan-week-stop R      週の枠が R を超えたら新規 spawn を止め、リセット時刻に自動再開（既定 0.9。0 で無効）
+  --plan-5h-stop R        5 時間枠が R を超えたら同様に止める（既定 0.95。0 で無効）
+  --plan-week-share R     この run が週の枠を R ぶん（例 0.3 = 30 ポイント）使ったら止める（既定 0 = 無効）
+  --plan-probe-min N      エージェントが動いていないとき、N 分ごとに枠を確かめる（既定 15。haiku を 1 回呼ぶ）
   --claude-permission-mode acceptEdits|bypassPermissions  worker の権限（既定 acceptEdits = worktree 内の編集を許可）
   --worker-tools "<list>"  worker に追加で許可するツール（既定 "Bash"。例: "Bash(python3:*),Bash(pytest:*)" で絞る）
   --codex-sandbox workspace-write|danger-full-access            worker の sandbox（既定 workspace-write）
@@ -80,6 +90,11 @@ const cfg = {
   maxTasks: num('max-tasks'),
   maxReviewRounds: num('max-review-rounds'),
   checkTimeoutSec: num('check-timeout'),
+  planWeekWarn: num('plan-week-warn'),
+  planWeekStop: num('plan-week-stop'),
+  planFiveHourStop: num('plan-5h-stop'),
+  planWeekShare: num('plan-week-share'),
+  planProbeMin: num('plan-probe-min'),
   burnWarn: 25000,
   burnCrit: 45000,
   startPaused: v.paused,

@@ -39,7 +39,10 @@ class Orchestrator extends EventEmitter {
       watchdog: {
         agent: 'watchdog',
         budget: { tokens: cfg.budgetTokens, costUsd: cfg.budgetUsd },
-        limits: { maxActiveAgents: cfg.maxAgents, maxAttemptsPerTask: cfg.maxAttempts, burnWarnPerMin: cfg.burnWarn, burnCritPerMin: cfg.burnCrit },
+        limits: { maxActiveAgents: cfg.maxAgents, maxAttemptsPerTask: cfg.maxAttempts, burnWarnPerMin: cfg.burnWarn, burnCritPerMin: cfg.burnCrit,
+          planWeekWarn: cfg.planWeekWarn, planWeekStop: cfg.planWeekStop, planFiveHourStop: cfg.planFiveHourStop, planWeekShare: cfg.planWeekShare },
+        // プランの利用枠（claude の rate_limit_event から）。{ fiveHour, sevenDay: { utilization, resetsAt }, at, weekStart }
+        plan: null,
         burn: Array(30).fill(0),
         usedTokens: 0,
         usedCostUsd: 0,
@@ -71,6 +74,69 @@ class Orchestrator extends EventEmitter {
     w.burn[w.burn.length - 1] += tokens;
   }
 
+  // ---------- プランの利用枠 ----------
+  usesClaude() { return this.ladder.some((r) => r.runner === 'claude'); }
+
+  updatePlan(info) {
+    const win = info?.unifiedWindows;
+    if (!win) return;
+    const w = this.state.watchdog;
+    const norm = (x) => x && { utilization: Number(x.utilization) || 0, resetsAt: x.resetsAt ? new Date(x.resetsAt * 1000).toISOString() : null };
+    const prev = w.plan;
+    const sevenDay = norm(win.seven_day);
+    // 週の枠がリセットされたら（または最初の観測なら）、この run の起点を取り直す
+    const weekStart = !prev?.sevenDay || !sevenDay || prev.sevenDay.resetsAt !== sevenDay.resetsAt ? sevenDay?.utilization ?? 0 : prev.weekStart;
+    w.plan = { fiveHour: norm(win.five_hour), sevenDay, status: info.status, at: new Date().toISOString(), weekStart };
+    this.lastPlanAt = Date.now();
+    this.checkPlan();
+    this.changed();
+  }
+
+  // 枠の使用率がしきい値を超えたら新規 spawn を止め、リセット時刻に自動で再開する
+  checkPlan() {
+    const run = this.state.run;
+    const w = this.state.watchdog;
+    const p = w.plan, L = w.limits;
+    if (!p) return;
+    const pct = (x) => `${Math.round(x * 100)}%`;
+    const at = (iso) => (iso ? new Date(iso).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '?');
+    if (run.planHold && Date.now() >= Date.parse(run.planHold.until)) {
+      this.log('watchdog', `利用枠のリセット時刻 (${at(run.planHold.until)}) を過ぎたので再開`);
+      run.planHold = null;
+      this.probePlanSoon(0);
+    }
+    const f = p.fiveHour, d = p.sevenDay;
+    const weekUsedByRun = d ? d.utilization - (p.weekStart ?? d.utilization) : 0;
+    let hold = null;
+    if (d && L.planWeekStop > 0 && d.utilization >= L.planWeekStop) hold = { reason: `週の枠が ${pct(d.utilization)}（停止 ${pct(L.planWeekStop)}）`, until: d.resetsAt, window: 'seven_day' };
+    else if (d && L.planWeekShare > 0 && weekUsedByRun >= L.planWeekShare) hold = { reason: `この run で週の枠を ${pct(weekUsedByRun)} 使用（上限 ${pct(L.planWeekShare)}）`, until: d.resetsAt, window: 'run_share' };
+    else if (f && L.planFiveHourStop > 0 && f.utilization >= L.planFiveHourStop) hold = { reason: `5 時間枠が ${pct(f.utilization)}（停止 ${pct(L.planFiveHourStop)}）`, until: f.resetsAt, window: 'five_hour' };
+    else if (p.status === 'rejected') hold = { reason: '利用枠の上限に到達', until: (f?.utilization >= (d?.utilization ?? 0) ? f : d)?.resetsAt, window: 'rejected' };
+    // 人間が「この枠は無視して続ける」と決めた窓は、リセットまで止めない
+    if (hold && run.planOverride && run.planOverride.window === hold.window && run.planOverride.until === hold.until) hold = null;
+    if (hold && !run.planHold && hold.until) {
+      run.planHold = hold;
+      this.log('watchdog', `${hold.reason}。新規 spawn を止め、${at(hold.until)} に自動で再開（実行中の agent は最後まで走らせる）`);
+      this.addRequests([{ kind: 'decision', blocking: false, title: `利用枠で一時停止中（${at(hold.until)} まで）`,
+        detail: `${hold.reason}。リセットを待たずに続けるなら、ボードの「枠を無視して続ける」か {"action":"unhold"} を送ってください。` }], { from: 'watchdog' });
+    }
+    if (d && L.planWeekWarn > 0 && d.utilization >= L.planWeekWarn && this.warnedWeek !== d.resetsAt) {
+      this.warnedWeek = d.resetsAt;
+      this.log('watchdog', `週の枠が ${pct(d.utilization)} に到達（警告 ${pct(L.planWeekWarn)}、${at(d.resetsAt)} にリセット）`);
+    }
+  }
+
+  // エージェントが動いていないと枠の値が更新されないので、ときどき自分で確かめる
+  probePlanSoon(delayMs) {
+    if (!this.usesClaude() || this.probing || this.shuttingDown) return;
+    clearTimeout(this.probeTimer);
+    this.probeTimer = setTimeout(async () => {
+      this.probing = true;
+      try { this.updatePlan(await runners.probeRateLimit(this.cfg)); } catch { /* 次の機会に */ }
+      this.probing = false;
+    }, delayMs);
+  }
+
   activeCount() {
     return Object.values(this.state.agents).filter((a) => a.state === 'active' && a.role !== 'watchdog').length;
   }
@@ -88,6 +154,10 @@ class Orchestrator extends EventEmitter {
 
     this.minuteTimer = setInterval(() => { const b = this.state.watchdog.burn; b.push(0); b.shift(); this.changed(); }, 60000);
     this.tickTimer = setInterval(() => this.schedule(), 1000);
+    this.planTimer = setInterval(() => {
+      if (Date.now() - (this.lastPlanAt || 0) >= this.cfg.planProbeMin * 60000) this.probePlanSoon(0);
+    }, 60000);
+    this.probePlanSoon(0);
 
     await this.plan();
     this.schedule();
@@ -106,6 +176,8 @@ class Orchestrator extends EventEmitter {
     this.shuttingDown = true;
     clearInterval(this.minuteTimer);
     clearInterval(this.tickTimer);
+    clearInterval(this.planTimer);
+    clearTimeout(this.probeTimer);
     for (const c of this.controllers) c.abort();
     await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => setTimeout(r, 10000))]);
   }
@@ -125,6 +197,7 @@ class Orchestrator extends EventEmitter {
       maxBudgetUsd: this.cfg.perCallUsd ? Math.min(this.cfg.perCallUsd, remainingUsd) : remainingUsd,
       onUsage: (total) => { const d = total - reported; reported = total; this.addUsage(d, 0); onTokens?.(d); this.changed(); },
       onActivity: (text) => { a.activity = text; opts.onActivity?.(text); this.changed(); },
+      onRateLimit: (info) => this.updatePlan(info),
     }, this.cfg);
     // 最終値で途中経過を補正する
     const d = res.tokens - reported;
@@ -204,7 +277,7 @@ class Orchestrator extends EventEmitter {
   schedule() {
     const run = this.state.run;
     if (this.shuttingDown) return;
-    if (!['running', 'paused', 'waiting-human', 'stuck', 'budget-stopped', 'done'].includes(run.status)) return;
+    if (!['running', 'paused', 'waiting-human', 'stuck', 'budget-stopped', 'plan-limit', 'done'].includes(run.status)) return;
     const lockInfo = locks.compute(this.state);
     const wd = watchdog.evaluate(this.state, lockInfo);
     const w = this.state.watchdog;
@@ -216,7 +289,8 @@ class Orchestrator extends EventEmitter {
     const vkey = lockInfo.violations.map(([a, b]) => `${a.taskId}/${b.taskId}`).join(', ');
     if (vkey && vkey !== this.lastViolation) this.log('watchdog', `ロック違反を検出: ${vkey}`);
     this.lastViolation = vkey;
-    const canSpawn = () => !run.paused && !run.frozen && this.activeCount() < w.limits.maxActiveAgents;
+    this.checkPlan();
+    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && this.activeCount() < w.limits.maxActiveAgents;
 
     const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done').map((e) => e.id));
     for (const e of this.state.epics) {
@@ -246,13 +320,14 @@ class Orchestrator extends EventEmitter {
       const startable = this.state.epics.some((e) => (e.status === 'running' && e.tasks.some((t) => t.status === 'todo')) ||
         (e.status === 'todo' && e.dependsOn.every((d) => doneIds.has(d))));
       if (run.frozen) next = 'budget-stopped';
+      else if (run.planHold) next = 'plan-limit';
       else if (run.paused && startable) next = 'paused';
       else if (this.state.epics.some((e) => e.tasks.some((t) => t.status === 'blocked'))) next = 'waiting-human';
       else if (!startable) next = 'stuck';
     }
     if (next !== run.status) {
       run.status = next;
-      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', paused: '一時停止中', running: '実行中' }[next];
+      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, paused: '一時停止中', running: '実行中' }[next];
       this.log(next === 'done' ? 'done' : 'watchdog', msg);
     }
     this.lastWatchdog = wd;
@@ -529,6 +604,11 @@ class Orchestrator extends EventEmitter {
       w.budget.costUsd = Math.round(w.budget.costUsd * 1.5 * 100) / 100;
       run.frozen = false;
       this.log('control', `予算を 1.5 倍に拡張して再開（${w.budget.tokens} tok / $${w.budget.costUsd}）`);
+    } else if (action === 'unhold') {
+      if (!run.planHold) throw new Error('利用枠で止まっていない');
+      run.planOverride = { window: run.planHold.window, until: run.planHold.until };
+      this.log('control', `利用枠の停止を人間の判断で解除（${run.planHold.reason}。この窓のリセットまで再停止しない）`);
+      run.planHold = null;
     } else if (action === 'retry') {
       const t = this.state.epics.flatMap((e) => e.tasks).find((x) => x.id === arg.taskId && x.status === 'failed');
       if (!t) throw new Error(`再試行できる task がない: ${arg.taskId}`);

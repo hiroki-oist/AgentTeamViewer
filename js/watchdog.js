@@ -25,6 +25,17 @@ ATV.watchdog = (() => {
     else if (burnNow >= w.limits.burnWarnPerMin) push('warn', `消費速度 ${fmtK(burnNow)} tok/min（警告 ${fmtK(w.limits.burnWarnPerMin)}）`);
     const minutesLeft = (w.budget.tokens - w.usedTokens) / Math.max(burnNow, 1);
 
+    // 2'. プランの利用枠（claude の 5 時間枠・週の枠）
+    const plan = w.plan;
+    if (plan) {
+      const L = w.limits, pct = (x) => `${Math.round(x * 100)}%`;
+      const d = plan.sevenDay, f = plan.fiveHour;
+      if (state.run?.planHold) push('crit', `利用枠で停止中: ${state.run.planHold.reason}`);
+      else if (d && L.planWeekStop > 0 && d.utilization >= L.planWeekStop * 0.95) push('crit', `週の枠 ${pct(d.utilization)}（停止 ${pct(L.planWeekStop)}）`);
+      else if (d && L.planWeekWarn > 0 && d.utilization >= L.planWeekWarn) push('warn', `週の枠 ${pct(d.utilization)}（警告 ${pct(L.planWeekWarn)}）`);
+      if (!state.run?.planHold && f && L.planFiveHourStop > 0 && f.utilization >= Math.min(0.8, L.planFiveHourStop)) push('warn', `5 時間枠 ${pct(f.utilization)}`);
+    }
+
     // 3. 同時稼働エージェント数
     const active = Object.values(state.agents).filter((a) => a.state === 'active' && a.role !== 'watchdog').length;
     if (active > w.limits.maxActiveAgents) push('crit', `稼働エージェント ${active} > 上限 ${w.limits.maxActiveAgents}`);

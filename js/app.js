@@ -14,7 +14,7 @@
   const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔' };
   const STATUS_LABEL = { ok: '✓ OK', warn: '▲ WARN', crit: '✕ CRIT' };
   const ALERT_ICON = { ok: '✓', warn: '▲', crit: '✕' };
-  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', done: '完了', failed: '失敗' };
+  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', done: '完了', failed: '失敗' };
   const CRITIC_VERDICT = { change_approach: 'やり方を変える', task_is_wrong: 'task を定義し直す', needs_human: '人間の判断が必要' };
   const REQ_KIND = { install: 'インストール', auth: '認証', access: '権限', decision: '判断', other: 'その他' };
 
@@ -86,6 +86,7 @@
     if (live) {
       $('#sim-toggle').textContent = run.paused ? '▶ 再開' : '⏸ 一時停止';
       $('#unfreeze').hidden = !run.frozen;
+      $('#unhold').hidden = !run.planHold;
     }
 
     // 「いま何をしているか」を 1 行で
@@ -113,10 +114,24 @@
     const eta = new Date(now().getTime() + wd.minutesLeft * 60000);
     $('#w-eta').textContent = wd.minutesLeft <= 0 ? '枯渇' : wd.burnNow < 1 ? '—' : `${hhmm(eta)} 頃（約${Math.round(wd.minutesLeft)}分）`;
     $('#w-burn').textContent = `現在 ${fmtK(wd.burnNow)}`;
+    renderPlan(w.plan);
     $('#w-alerts').innerHTML = wd.alerts.length
       ? wd.alerts.map((a) => `<li class="${a.level}"><span class="ic">${ALERT_ICON[a.level]}</span><span>${esc(a.msg)}</span></li>`).join('')
       : '<li class="ok"><span class="ic">✓</span><span>異常なし</span></li>';
     renderSpark();
+  }
+
+  // プランの利用枠。値は run がエージェントを動かしたとき（か定期の確認）に更新される
+  function renderPlan(plan) {
+    for (const [key, sel] of [['fiveHour', 'plan5'], ['sevenDay', 'plan7']]) {
+      const x = plan?.[key];
+      $(`#w-${sel}-wrap`).hidden = !x;
+      if (!x) continue;
+      const reset = x.resetsAt ? new Date(x.resetsAt) : null;
+      const when = reset ? (key === 'fiveHour' ? hhmm(reset) : `${reset.getMonth() + 1}/${reset.getDate()} ${hhmm(reset)}`) : '?';
+      $(`#w-${sel}`).textContent = `${Math.round(x.utilization * 100)}%（${when} リセット）`;
+      setMeter(`#w-${sel}-bar`, x.utilization);
+    }
   }
 
   function setMeter(sel, ratio) {
@@ -402,6 +417,9 @@
   $('#sim-toggle').addEventListener('click', () => {
     if (live) return post('api/control', { action: state.run.paused ? 'resume' : 'pause' });
     simTimer ? stopSim() : startSim();
+  });
+  $('#unhold').addEventListener('click', () => {
+    if (confirm('利用枠のリセットを待たずに再開します（この枠がリセットされるまで再停止しません）。よろしいですか？')) post('api/control', { action: 'unhold' });
   });
   $('#unfreeze').addEventListener('click', () => {
     if (confirm('予算を 1.5 倍に広げて再開します。よろしいですか？')) post('api/control', { action: 'unfreeze' });
