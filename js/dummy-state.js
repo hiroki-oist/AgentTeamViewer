@@ -132,6 +132,8 @@ ATV.dummyState = () => ({
       20100, 22800, 24500, 23100, 26400, 28900, 27200, 25600, 24100, 26800, 29300, 27700, 26200, 28400, 27100],
     usedTokens: 1_724_000,
     usedCostUsd: 31.8,
+    // 1 分ごとの累計（デモ用: 直近 1 時間で 1.2M tok / $21 を使った）
+    history: Array.from({ length: 61 }, (_, i) => ({ t: new Date(Date.parse('2026-09-28T22:20:00+09:00') - (60 - i) * 60e3).toISOString(), tok: 1_724_000 - (60 - i) * 20_000, usd: Math.round((31.8 - (60 - i) * 0.35) * 100) / 100 })),
     // プランの利用枠（デモ用。リセット時刻は表示時点からの相対）
     plan: {
       fiveHour: { utilization: 0.42, resetsAt: new Date(Date.now() + 2.6 * 3600e3).toISOString() },

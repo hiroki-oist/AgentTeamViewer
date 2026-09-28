@@ -33,6 +33,17 @@
   const oneLine = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
   const RESULT_LABEL = { ok: '成功', fail: '失敗', blocked: '人間待ち', interrupted: '中断', running: '実行中' };
 
+  // 予算の減り方: 1 分ごとの累計の記録のうち、直近 60 分の最初と今の差から（記録が 2 分未満なら出さない）
+  function recentRate(w) {
+    const h = w.history || [];
+    if (!h.length) return null;
+    const tNow = now().getTime();
+    const from = h.find((x) => tNow - Date.parse(x.t) <= 60 * 60000) || h[h.length - 1];
+    const minutes = (tNow - Date.parse(from.t)) / 60000;
+    if (minutes < 2) return null;
+    return { minutes, usdPerMin: Math.max(0, w.usedCostUsd - from.usd) / minutes, tokPerMin: Math.max(0, w.usedTokens - from.tok) / minutes };
+  }
+
   // ---------- 進み具合と所要時間の見込み ----------
   const minsSince = (iso) => (iso ? (now() - new Date(iso)) / 60000 : 0);
   const lastAttempt = (t) => t.attempts[t.attempts.length - 1];
@@ -166,13 +177,19 @@
     setMeter('#w-tokens-bar', wd.tokenRatio);
     setMeter('#w-cost-bar', wd.costRatio);
     $('#w-active').textContent = `${wd.active} / ${w.limits.maxActiveAgents}`;
-    // トークンと金額のうち、先に尽きるほう（金額はトークンあたりの平均単価で速度を換算）
-    const usdPerTok = w.usedTokens > 0 ? w.usedCostUsd / w.usedTokens : 0;
-    const costMin = usdPerTok > 0 && wd.burnNow >= 1 ? (w.budget.costUsd - w.usedCostUsd) / (wd.burnNow * usdPerTok) : Infinity;
-    const leftMin = Math.min(wd.minutesLeft, costMin);
-    if (leftMin <= 0) setStat('#w-eta', '枯渇');
-    else if (wd.burnNow < 1) setStat('#w-eta', '—', '消費なし');
-    else setStat('#w-eta', `あと ${fmtDur(leftMin)}`, `${mdhm(new Date(now().getTime() + leftMin * 60000))} 頃`, `今の消費速度が続いた場合（${leftMin === costMin ? '金額' : 'トークン'}が先に尽きる）`);
+    // 直近 1 時間の実際の増え方（1 分ごとの累計の記録から）。金額とトークンのうち先に尽きるほう
+    const r = recentRate(w);
+    if (!r) setStat('#w-eta', '—', '記録がまだ少ない');
+    else {
+      const costMin = r.usdPerMin > 0 ? (w.budget.costUsd - w.usedCostUsd) / r.usdPerMin : Infinity;
+      const tokMin = r.tokPerMin > 0 ? (w.budget.tokens - w.usedTokens) / r.tokPerMin : Infinity;
+      const leftMin = Math.min(costMin, tokMin);
+      const basis = `直近${r.minutes >= 59 ? '1時間' : `${Math.round(r.minutes)}分`} $${(r.usdPerMin * 60).toFixed(1)}/時`;
+      if (leftMin <= 0) setStat('#w-eta', '枯渇');
+      else if (!isFinite(leftMin)) setStat('#w-eta', '—', `${basis}（消費なし）`);
+      else setStat('#w-eta', `あと ${fmtDur(leftMin)}`, `${mdhm(new Date(now().getTime() + leftMin * 60000))} 頃 · ${basis}`,
+        `${basis}・${fmtK(r.tokPerMin)} tok/分のまま続いた場合（${leftMin === costMin ? '金額' : 'トークン'}が先に尽きる）`);
+    }
     $('#w-burn').textContent = `現在 ${fmtK(wd.burnNow)}`;
     renderPlan(w.plan);
     $('#w-alerts').innerHTML = wd.alerts.length

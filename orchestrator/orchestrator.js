@@ -186,7 +186,14 @@ class Orchestrator extends EventEmitter {
       : `bwrap が使えないため、保護パスの変化を監視する（見つけたら新規 spawn を停止）: ${this.protector.paths.join(', ')}`);
     this.protectTimer = setInterval(() => this.checkProtected(), 5000);
 
-    this.minuteTimer = setInterval(() => { const b = this.state.watchdog.burn; b.push(0); b.shift(); this.changed(); }, 60000);
+    // 1 分ごとに累計を記録する（予算枯渇の予測は直近 1 時間の実際の増え方から出す。24 時間ぶん持つ）
+    const record = () => {
+      const w = this.state.watchdog;
+      (w.history ||= []).push({ t: new Date().toISOString(), tok: w.usedTokens, usd: Math.round(w.usedCostUsd * 1e4) / 1e4 });
+      if (w.history.length > 1440) w.history.splice(0, w.history.length - 1440);
+    };
+    record();
+    this.minuteTimer = setInterval(() => { const b = this.state.watchdog.burn; b.push(0); b.shift(); record(); this.changed(); }, 60000);
     this.tickTimer = setInterval(() => this.schedule(), 1000);
     this.planTimer = setInterval(() => {
       if (Date.now() - (this.lastPlanAt || 0) >= this.cfg.planProbeMin * 60000) this.probePlanSoon(0);
@@ -216,6 +223,7 @@ class Orchestrator extends EventEmitter {
     w.usedCostUsd = pw.usedCostUsd || 0;
     w.plan = pw.plan || null;
     w.byModel = pw.byModel || {};
+    w.history = pw.history || [];
     w.probeCostUsd = pw.probeCostUsd || 0;
     const known = new Set(Object.keys(prev.agents || {}));
     s.agents = { ...s.agents, ...Object.fromEntries(Object.entries(prev.agents || {}).filter(([k]) => k !== 'watchdog').map(([k, a]) => [k, { ...a, state: a.state === 'active' ? 'waiting' : a.state, activity: null }])) };
