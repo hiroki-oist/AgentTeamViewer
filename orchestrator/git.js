@@ -37,6 +37,9 @@ class Repo {
     fs.mkdirSync(path.dirname(exclude), { recursive: true });
     const cur = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
     if (!cur.split('\n').includes('.atv/')) fs.appendFileSync(exclude, `${cur && !cur.endsWith('\n') ? '\n' : ''}.atv/\n`);
+    // worker が進み具合を書くファイル（orchestrator が読むだけ。コミットしない）
+    const cur2 = fs.readFileSync(exclude, 'utf8');
+    if (!cur2.split('\n').includes('.atv-progress.json')) fs.appendFileSync(exclude, `${cur2.endsWith('\n') ? '' : '\n'}.atv-progress.json\n`);
 
     const dirty = (await git(this.root, ['status', '--porcelain'])).out;
     this.baseSha = (await git(this.root, ['rev-parse', 'HEAD'])).out;

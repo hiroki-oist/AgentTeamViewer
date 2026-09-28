@@ -571,14 +571,33 @@ class Orchestrator extends EventEmitter {
 
     let wt = null;
     let needCritic = false;
+    let progressTimer = null;
     const finish = (result, note) => {
       attempt.result = result;
       attempt.note = note;
       attempt.endedAt = new Date().toISOString();
       t.activity = null;
+      clearInterval(progressTimer);
     };
     try {
       wt = await this.repo.createTaskWorktree(t.id, t.attempts.length);
+      // worker が書く進み具合（手順の一覧と今の作業）を数秒ごとに取り込む
+      const pfile = path.join(wt.path, '.atv-progress.json');
+      progressTimer = setInterval(() => {
+        fs.readFile(pfile, 'utf8', (err, txt) => {
+          if (err) return;
+          try {
+            const p = JSON.parse(txt);
+            const steps = (Array.isArray(p.steps) ? p.steps : []).slice(0, 12).map((x) => ({ title: oneLine(x.title, 80), done: Boolean(x.done) }));
+            const next = { steps, now: oneLine(p.now, 100), at: new Date().toISOString() };
+            if (JSON.stringify([next.steps, next.now]) === JSON.stringify([attempt.progress?.steps, attempt.progress?.now])) return;
+            if (!attempt.progress || attempt.progress.steps.filter((x) => x.done).length !== steps.filter((x) => x.done).length) next.stepAt = next.at;
+            else next.stepAt = attempt.progress.stepAt;
+            attempt.progress = next;
+            this.changed();
+          } catch { /* 書きかけ */ }
+        });
+      }, 4000);
       // 前の試行が人間待ちで止まっていたら、その途中の変更を持ち込む
       if (t.carryBranch) {
         const ok = await this.repo.carryOver(wt, t.carryBranch);
@@ -672,6 +691,7 @@ class Orchestrator extends EventEmitter {
         this.log('fail', `${t.id} 失敗 (${attempt.model}/${attempt.effort}): ${oneLine(note)}`);
       }
     } finally {
+      clearInterval(progressTimer);
       if (wt) await this.repo.removeWorktree(wt);
       this.changed();
       if (needCritic && !this.shuttingDown && !this.state.run.draining) await this.runCritic(e, t); // 再起動待ちなら critic は次のプロセスで

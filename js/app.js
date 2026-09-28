@@ -32,6 +32,44 @@
   const hhmm = (d) => d.toTimeString().slice(0, 5);
   const oneLine = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
   const RESULT_LABEL = { ok: '成功', fail: '失敗', blocked: '人間待ち', interrupted: '中断', running: '実行中' };
+
+  // ---------- 進み具合と所要時間の見込み ----------
+  const minsSince = (iso) => (iso ? (now() - new Date(iso)) / 60000 : 0);
+  const lastAttempt = (t) => t.attempts[t.attempts.length - 1];
+  // 完了した task の所要時間（最初の試行の開始 → 最後の試行の終了）。run 全体の平均を見込みに使う
+  function avgTaskMin() {
+    const d = state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' && t.attempts.length)
+      .map((t) => (new Date(lastAttempt(t).endedAt || lastAttempt(t).startedAt) - new Date(t.attempts[0].startedAt)) / 60000).filter((x) => x > 0);
+    return d.length ? d.reduce((a, b) => a + b, 0) / d.length : null;
+  }
+  // 実行中の task の見込み: 手順の進みから比例で出す。手順がまだなら run の平均との差
+  function taskEta(t) {
+    const a = lastAttempt(t);
+    if (!a || a.result !== 'running') return null;
+    const el = minsSince(a.startedAt);
+    const st = a.progress?.steps || [];
+    const done = st.filter((x) => x.done).length;
+    if (st.length && done) return { el, left: (el / done) * (st.length - done), done, total: st.length, basis: '手順' };
+    const avg = avgTaskMin();
+    return { el, left: avg != null ? Math.max(avg - el, 1) : null, done, total: st.length, basis: '平均' };
+  }
+  // 中プロジェクトの残りの見込み: 実行中の最長 + 未着手ぶん（同時数で割る）
+  function epicEta(e) {
+    const todo = e.tasks.filter((t) => ['todo', 'blocked', 'critique'].includes(t.status)).length;
+    const running = e.tasks.filter((t) => t.status === 'running').map(taskEta).filter(Boolean);
+    const avg = avgTaskMin();
+    if (!todo && !running.length) return null;
+    const runLeft = running.length ? Math.max(...running.map((x) => x.left ?? avg ?? 0)) : 0;
+    const par = Math.max(1, Math.min(state.watchdog.limits.maxActiveAgents, todo));
+    const todoLeft = avg != null ? Math.ceil(todo / par) * avg : null;
+    return { todo, running: running.length, left: todoLeft == null && !running.length ? null : runLeft + (todoLeft || 0), avg };
+  }
+  function progressBlock(a) {
+    const st = a.progress?.steps || [];
+    if (!st.length && !a.progress?.now) return '';
+    const firstOpen = st.findIndex((x) => !x.done);
+    return `<ol class="steps">${st.map((x, i) => `<li class="${x.done ? 'done' : i === firstOpen && a.result === 'running' ? 'now' : ''}">${x.done ? '✓' : i === firstOpen && a.result === 'running' ? '▶' : '○'} ${esc(x.title)}</li>`).join('')}</ol>${a.progress?.now && a.result === 'running' ? `<div class="now-doing">いま: ${esc(a.progress.now)}</div>` : ''}`;
+  }
   const mdhm = (d) => `${d.getMonth() + 1}/${d.getDate()} ${hhmm(d)}`;
   // 残り時間を短く: 45分 / 13時間20分 / 2日5時間
   const fmtDur = (min) => {
@@ -202,7 +240,11 @@
           const crit = t.status === 'critique'
             ? `<span class="critic">⚔ 批判的レビュー中 ${chip(t.critic)}</span>`
             : lastCrit && t.status !== 'done' ? `<span class="critic" title="${esc(lastCrit.diagnosis)}">⚔ ${CRITIC_VERDICT[lastCrit.verdict] || esc(lastCrit.verdict)}</span>` : '';
-          const act = (t.status === 'running' || t.status === 'critique') && t.activity ? `<span class="activity" title="${esc(t.activity)}">${esc(t.activity)}</span>` : '';
+          const la = lastAttempt(t);
+          const eta = t.status === 'running' ? taskEta(t) : null;
+          const prog = eta && la?.progress?.steps?.length ? `<span class="prog">手順 ${eta.done}/${eta.total}${eta.left != null ? ` · あと約 ${fmtDur(eta.left)}` : ''}</span>` : eta?.left != null ? `<span class="prog">あと約 ${fmtDur(eta.left)}（平均から）</span>` : '';
+          const nowText = t.status === 'running' && la?.progress?.now ? la.progress.now : t.activity;
+          const act = (t.status === 'running' || t.status === 'critique') && nowText ? `<span class="activity" title="${esc(t.activity || nowText)}">${prog}${esc(nowText)}</span>` : prog ? `<span class="activity">${prog}</span>` : '';
           return `<li class="task ${t.status}">
               <span class="st" title="${t.status}">${TASK_ICON[t.status] || '○'}</span>
               <span class="t-title" title="${esc(t.headline || t.brief || t.title)}">${t.kind ? `<span class="kind" title="${esc(state.kinds?.[t.kind]?.description || t.kind)}">${esc(t.kind)}</span>` : ''}${esc(t.id)} ${esc(t.title)}</span>
@@ -222,6 +264,7 @@
                 <span>B<i style="--v:${r.blast * 100}%"></i></span>
               </span>
               ${pendingDeps.length ? `<span>依存待ち: ${esc(pendingDeps.join(', '))}</span>` : ''}
+              ${(() => { const x = epicEta(e); return x?.left != null ? `<span class="eta" title="完了した task の平均 ${x.avg != null ? fmtDur(x.avg) : '—'} と、実行中の task の手順の進みからの目安">残り約 ${fmtDur(x.left)}</span>` : ''; })()}
             </div>
             <div class="meter"><div class="meter-fill" style="width:${(done / e.tasks.length) * 100}%"></div></div>
             ${e.review ? `<div class="review-note">レビュー ${chip(e.review.reviewer)} ${esc(e.review.note)}</div>` : ''}
@@ -302,7 +345,7 @@
             ${t.grants?.length ? `<div class="desc">追加で許可: ${esc(t.grants.join(', '))}</div>` : ''}</details>` : ''}</td>
         <td>${t.status}${t.status === 'failed' && live ? `<br><button class="btn" data-retry="${esc(t.id)}">再試行</button>` : ''}</td><td>${chip(t.agent)}</td>
         <td>${t.writeSet.map((f) => `<span class="file">${esc(f)}</span>`).join(' ') || '<span class="muted">読み取りのみ</span>'}</td>
-        <td>${t.attempts.map((a, i) => `<div class="att">#${i + 1} <b>${RESULT_LABEL[a.result] || esc(a.result)}</b> <span class="muted">${esc(a.model)}/${esc(a.effort)}</span>${a.headline ? ` — ${esc(a.headline)}` : ''}${a.note ? `<details><summary>${esc(oneLine(a.note, 70))}</summary><div class="desc">${esc(a.note)}</div></details>` : ''}</div>`).join('') || '—'}
+        <td>${t.attempts.map((a, i) => `<div class="att">#${i + 1} <b>${RESULT_LABEL[a.result] || esc(a.result)}</b> <span class="muted">${esc(a.model)}/${esc(a.effort)} · ${a.result === 'running' ? `経過 ${fmtDur(minsSince(a.startedAt))}${(() => { const x = taskEta(t); return x?.left != null ? ` · あと約 ${fmtDur(x.left)}（${x.basis}から）` : ''; })()}` : a.endedAt ? fmtDur((new Date(a.endedAt) - new Date(a.startedAt)) / 60000) : ''}</span>${a.result === 'running' ? progressBlock(a) : a.progress?.steps?.length ? `<details><summary>手順 ${a.progress.steps.filter((x) => x.done).length}/${a.progress.steps.length}</summary>${progressBlock(a)}</details>` : ''}${a.headline ? ` — ${esc(a.headline)}` : ''}${a.note ? `<details><summary>${esc(oneLine(a.note, 70))}</summary><div class="desc">${esc(a.note)}</div></details>` : ''}</div>`).join('') || '—'}
           ${(t.critiques || []).map((c) => `<div class="critique"><b>⚔ critic ${esc(c.model)}/${esc(c.effort)} → ${CRITIC_VERDICT[c.verdict] || esc(c.verdict)}</b>
             <div>${esc(c.diagnosis)}</div>
             ${c.flawedAssumptions?.length ? `<div class="muted">誤った前提: ${esc(c.flawedAssumptions.join(' / '))}</div>` : ''}
@@ -314,6 +357,8 @@
       <span class="eyebrow">${esc(e.id)} · ${e.status}</span>
       <h3>${esc(e.title)}</h3>
       ${e.brief ? `<p class="brief">${esc(e.brief)}</p>` : ''}
+      ${(() => { const d = e.tasks.filter((t) => t.status === 'done').length; const x = epicEta(e);
+        return `<p class="epic-progress">task 完了 ${d}/${e.tasks.length}${x ? `・実行中 ${x.running}・未着手 ${x.todo}${x.left != null ? `・残り約 ${fmtDur(x.left)}` : ''}` : ''}${x?.avg != null ? `<span class="muted">（完了した task の平均 ${fmtDur(x.avg)}。実行中は手順の進みから）</span>` : ''}</p>`; })()}
       <p class="muted">リスク score = 0.5·C + 0.3·U + 0.2·B = <b>${riskScore(e.risk).toFixed(2)}</b>
         → 初期ルーティング <b>${r.model}/${r.effort}</b>（失敗ごとに 1 段昇格）。依存: ${esc(e.dependsOn.join(', ')) || 'なし'}</p>
       ${e.review ? `<p class="desc">レビュー: ${esc(e.review.note)}</p>` : e.lastReviewNote ? `<p class="desc">前回レビュー: ${esc(e.lastReviewNote)}</p>` : ''}
