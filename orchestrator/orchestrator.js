@@ -649,7 +649,7 @@ class Orchestrator extends EventEmitter {
             const p = JSON.parse(txt);
             const steps = (Array.isArray(p.steps) ? p.steps : []).slice(0, 12).map((x) => ({ title: oneLine(x.title, 80), done: Boolean(x.done) }));
             const next = { steps, now: oneLine(p.now, 100), at: new Date().toISOString() };
-            if (JSON.stringify([next.steps, next.now]) === JSON.stringify([attempt.progress?.steps, attempt.progress?.now])) return;
+            if (JSON.stringify([next.steps, next.now]) === JSON.stringify([attempt.progress?.steps, attempt.progress?.now])) return; // 変わっていなければ at は最後に書き換わった時刻のまま
             if (!attempt.progress || attempt.progress.steps.filter((x) => x.done).length !== steps.filter((x) => x.done).length) next.stepAt = next.at;
             else next.stepAt = attempt.progress.stepAt;
             attempt.progress = next;
