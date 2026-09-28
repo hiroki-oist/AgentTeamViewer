@@ -90,6 +90,9 @@ class Orchestrator extends EventEmitter {
     const weekStart = !prev?.sevenDay || !sevenDay || prev.sevenDay.resetsAt !== sevenDay.resetsAt ? sevenDay?.utilization ?? 0 : prev.weekStart;
     w.plan = { fiveHour: norm(win.five_hour), sevenDay, status: info.status, at: new Date().toISOString(), weekStart };
     this.lastPlanAt = Date.now();
+    // 窓は増えることがある（Fable を使うと seven_day_overage_included が出る）。全部そのまま残す
+    w.planWindows = Object.fromEntries(Object.entries(win).map(([k, x]) => [k, { utilization: Number(x?.utilization) || 0, resetsAt: x?.resetsAt ? new Date(x.resetsAt * 1000).toISOString() : null }]));
+    if (info.probeCostUsd) w.probeCostUsd = (w.probeCostUsd || 0) + info.probeCostUsd;
     this.checkPlan();
     this.changed();
   }
@@ -211,6 +214,8 @@ class Orchestrator extends EventEmitter {
     w.usedTokens = pw.usedTokens || 0;
     w.usedCostUsd = pw.usedCostUsd || 0;
     w.plan = pw.plan || null;
+    w.byModel = pw.byModel || {};
+    w.probeCostUsd = pw.probeCostUsd || 0;
     const known = new Set(Object.keys(prev.agents || {}));
     s.agents = { ...s.agents, ...Object.fromEntries(Object.entries(prev.agents || {}).filter(([k]) => k !== 'watchdog').map(([k, a]) => [k, { ...a, state: a.state === 'active' ? 'waiting' : a.state, activity: null }])) };
     this.agentSeq = Math.max(0, ...[...known].map((k) => Number(k.split('-').pop()) || 0));
@@ -278,6 +283,13 @@ class Orchestrator extends EventEmitter {
       onActivity: (text) => { a.activity = text; opts.onActivity?.(text); this.changed(); },
       onRateLimit: (info) => this.updatePlan(info),
     }, this.cfg);
+    // モデル別の累計（利用枠との関係を調べるため。キャッシュ読み込みも別に数える）
+    const bm = (this.state.watchdog.byModel ||= {});
+    for (const [m, u] of Object.entries(res.modelUsage || {})) {
+      const x = (bm[m] ||= { calls: 0, costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+      x.calls++; x.costUsd += u.costUSD || 0; x.inputTokens += u.inputTokens || 0; x.outputTokens += u.outputTokens || 0;
+      x.cacheReadTokens += u.cacheReadInputTokens || 0; x.cacheWriteTokens += u.cacheCreationInputTokens || 0;
+    }
     // 最終値で途中経過を補正する
     const d = res.tokens - reported;
     this.addUsage(d, res.costUsd || 0);

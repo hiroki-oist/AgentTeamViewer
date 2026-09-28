@@ -85,19 +85,21 @@ async function claude(opts, cfg) {
   const denials = (final.permission_denials || []).map((d) => ({ tool: d.tool_name, command: d.tool_input?.command || d.tool_input?.file_path || '' }));
   const denied = denials.map((d) => `${d.tool} ${oneLine(d.command, 60)}`);
   if (denied.length && final.structured_output) final.structured_output.summary = `${final.structured_output.summary}（権限で拒否: ${denied.slice(0, 3).join(' / ')}）`;
-  if (final.is_error || !final.structured_output) return { ok: false, tokens, costUsd, denials, error: `claude: ${final.subtype} ${oneLine(final.result, 300)}` };
-  return { ok: true, output: final.structured_output, tokens, costUsd, denials };
+  const modelUsage = final.modelUsage || {};
+  if (final.is_error || !final.structured_output) return { ok: false, tokens, costUsd, denials, modelUsage, error: `claude: ${final.subtype} ${oneLine(final.result, 300)}` };
+  return { ok: true, output: final.structured_output, tokens, costUsd, denials, modelUsage };
 }
 
 const sum = (m) => [...m.values()].reduce((a, b) => a + b, 0);
 
 // プランの利用枠だけを知りたいときの最小の呼び出し（haiku に 1 語返させる。数セント）
 async function probeRateLimit(cfg) {
-  let info = null;
+  let info = null, cost = 0;
   await runJsonl(cfg.claudeBin, ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--model', 'haiku', '--max-budget-usd', '0.10'], {
     cwd: os.tmpdir(), input: 'Reply with just: ok',
-    onLine: (ev) => { if (ev.type === 'rate_limit_event') info = ev.rate_limit_info; },
+    onLine: (ev) => { if (ev.type === 'rate_limit_event') info = ev.rate_limit_info; else if (ev.type === 'result') cost = ev.total_cost_usd || 0; },
   });
+  if (info) info.probeCostUsd = cost;
   return info;
 }
 
