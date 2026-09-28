@@ -236,8 +236,11 @@ class Orchestrator extends EventEmitter {
 
     if (this.cfg.resume && fs.existsSync(this.statePath)) {
       this.restore(JSON.parse(fs.readFileSync(this.statePath, 'utf8')));
+      // 依存と説明を補い終わるまでは task を始めない（依存が分かる前に走り出さないように）
+      this.state.run.status = 'planning';
       await this.inferNeeds();
       await this.inferBriefs();
+      this.state.run.status = 'running';
     } else await this.plan();
     this.schedule();
   }

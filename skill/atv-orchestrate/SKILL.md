@@ -60,12 +60,13 @@ description: いま開いている repo で、Agent Team Viewer のオーケス�
 
 ## 4. 起動（計画だけ立てて一時停止）
 
-この会話が終わってもオーケストレータが動き続けるよう、`nohup` でプロセスを切り離して起動する。
+この会話が終わってもオーケストレータが動き続けるよう、`nohup` でプロセスを切り離し、`systemd-run --user --scope` でこの会話とは別の cgroup に入れて起動する（メモリ不足のときに、この会話と一緒に強制終了されないように。`MemoryMax` を付けると、超えたときにジョブだけが止まり、マシン全体は落ちない）。goal ファイルの制約には、ローカルで同時に動かす重いジョブの数の上限と、学習をどの計算機に回すかを必ず書く。
 
 ```bash
 ROOT=$(git rev-parse --show-toplevel); RUN=<runId>
 mkdir -p "$ROOT/.atv/$RUN"
-nohup atv --repo "$ROOT" --goal-file "$ROOT/.atv/goals/$RUN.md" --run-id "$RUN" --paused \
+nohup systemd-run --user --scope --unit="atv-$RUN" -p MemoryMax=<RAM の 8 割程度>G \
+  atv --repo "$ROOT" --goal-file "$ROOT/.atv/goals/$RUN.md" --run-id "$RUN" --paused \
   --check "<検証コマンド>" <合意したオプション> > "$ROOT/.atv/$RUN/orchestrator.log" 2>&1 &
 ```
 
