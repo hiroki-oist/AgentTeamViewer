@@ -142,6 +142,37 @@ class Orchestrator extends EventEmitter {
     }, delayMs);
   }
 
+  // メモリの見張り: 空きが --mem-min-gb を下回ったら新規 spawn を止める（エージェントが起動したジョブの積み過ぎで
+  // マシンごと落ちるのを防ぐ）。空きが 1.5 倍まで戻れば自動で解除する
+  checkMemory() {
+    let info;
+    try {
+      const t = fs.readFileSync('/proc/meminfo', 'utf8');
+      const kb = (k) => Number((t.match(new RegExp(`^${k}:\\s+(\\d+)`, 'm')) || [])[1] || 0);
+      info = { availGb: kb('MemAvailable') / 1048576, totalGb: kb('MemTotal') / 1048576 };
+    } catch { return; }
+    const w = this.state.watchdog, run = this.state.run, min = this.cfg.memMinGb || 0;
+    w.mem = { availGb: Math.round(info.availGb * 10) / 10, totalGb: Math.round(info.totalGb), minGb: min };
+    if (!(min > 0)) return;
+    if (!run.memHold && info.availGb < min) {
+      run.memHold = { availGb: w.mem.availGb, at: new Date().toISOString() };
+      let top = '';
+      try { top = require('node:child_process').execFileSync('ps', ['-u', String(process.getuid()), '-o', 'rss=,etime=,args=', '--sort=-rss'], { encoding: 'utf8' }).split('\n').slice(0, 6).map((l) => l.trim()).filter(Boolean).map((l) => { const [rss, et, ...a] = l.split(/\s+/); return `${(Number(rss) / 1048576).toFixed(1)} GB  ${et}  ${a.join(' ').slice(0, 120)}`; }).join('\n'); } catch { /* ps がない */ }
+      run.memHold.top = top;
+      this.log('watchdog', `メモリの空きが ${w.mem.availGb} GB（下限 ${min} GB）。新規 spawn を停止`);
+      this.addRequests([{ kind: 'decision', blocking: false, title: `メモリの空きが ${w.mem.availGb} GB まで減った。重いジョブを減らしてほしい`,
+        detail: `空きが下限 ${min} GB を下回ったので、新しいエージェントを立てるのを止めています（空きが ${Math.round(min * 1.5)} GB に戻れば自動で再開）。\nメモリを多く使っているプロセス:\n${top}`,
+        options: [{ label: '自然に空くのを待つ', description: '動いているジョブが終わるのを待つ。何もしない' }, { label: '重いジョブを止める', description: '返答欄にどれを止めるか書く。点検役か次の worker が止める' }],
+        recommended: '自然に空くのを待つ' }], { from: 'watchdog' });
+      this.inspectSoon('メモリ不足', 0);
+      this.schedule();
+    } else if (run.memHold && info.availGb >= min * 1.5) {
+      this.log('watchdog', `メモリの空きが ${w.mem.availGb} GB に戻った。再開`);
+      run.memHold = null;
+      this.schedule();
+    }
+  }
+
   // 保護パスに起動時（か人間の了承時）からの変化があれば、新規 spawn を止めて知らせる
   async checkProtected() {
     if (this.checkingProtected || this.state.run.protectHold || this.shuttingDown) return;
@@ -185,6 +216,8 @@ class Orchestrator extends EventEmitter {
       ? `保護パスを読み取り専用にしてエージェントを動かす（bwrap）: ${this.protector.paths.join(', ')}`
       : `bwrap が使えないため、保護パスの変化を監視する（見つけたら新規 spawn を停止）: ${this.protector.paths.join(', ')}`);
     this.protectTimer = setInterval(() => this.checkProtected(), 5000);
+    this.memTimer = setInterval(() => this.checkMemory(), 5000);
+    this.checkMemory();
     if (this.cfg.inspectMin > 0) this.inspectTimer = setInterval(() => this.inspectSoon('定期'), this.cfg.inspectMin * 60000);
 
     // 1 分ごとに累計を記録する（予算枯渇の予測は直近 1 時間の実際の増え方から出す。24 時間ぶん持つ）
@@ -279,6 +312,7 @@ class Orchestrator extends EventEmitter {
     clearInterval(this.tickTimer);
     clearInterval(this.planTimer);
     clearInterval(this.protectTimer);
+    clearInterval(this.memTimer);
     clearInterval(this.inspectTimer);
     clearTimeout(this.inspectDebounce);
     clearTimeout(this.probeTimer);
@@ -508,6 +542,13 @@ class Orchestrator extends EventEmitter {
     const durs = done.map((t) => (Date.parse(t.attempts[t.attempts.length - 1].endedAt || t.attempts[0].startedAt) - Date.parse(t.attempts[0].startedAt)) / 60000).filter((x) => x > 0);
     const avg = durs.length ? Math.round(durs.reduce((a, b) => a + b, 0) / durs.length) : null;
     const lines = [`run: ${this.state.run.status}${this.state.run.paused ? ' (paused)' : ''}; average finished task ${avg ?? '?'} min; active agents ${this.activeCount()}/${this.state.watchdog.limits.maxActiveAgents}`];
+    const mem = this.state.watchdog.mem;
+    if (mem) lines.push(`memory: ${mem.availGb} GB free of ${mem.totalGb} GB (spawns stop below ${mem.minGb} GB)`);
+    try {
+      const jobs = require('node:child_process').execFileSync('ps', ['-u', String(process.getuid()), '-o', 'rss=,etime=,args=', '--sort=-rss'], { encoding: 'utf8' }).split('\n').slice(0, 8).map((l) => l.trim()).filter(Boolean)
+        .map((l) => { const [rss, et, ...a] = l.split(/\s+/); return `  ${(Number(rss) / 1048576).toFixed(1)} GB, running ${et}: ${a.join(' ').slice(0, 110)}`; });
+      lines.push('largest processes on this machine:', ...jobs);
+    } catch { /* ps がない */ }
     for (const e of this.state.epics) {
       lines.push(`EPIC ${e.id} [${e.status}] ${e.title} — brief: ${e.brief || '(none)'}${e.review ? ` — review: ${oneLine(e.review.note, 120)}` : ''}`);
       for (const t of e.tasks) {
@@ -674,7 +715,7 @@ class Orchestrator extends EventEmitter {
   schedule() {
     const run = this.state.run;
     if (this.shuttingDown) return;
-    if (!['running', 'paused', 'waiting-human', 'stuck', 'budget-stopped', 'plan-limit', 'protect-hold', 'done'].includes(run.status)) return;
+    if (!['running', 'paused', 'waiting-human', 'stuck', 'budget-stopped', 'plan-limit', 'protect-hold', 'mem-hold', 'done'].includes(run.status)) return;
     if (run.draining) { this.changed(); return; } // 再起動待ち。実行中の agent は各自の finally から戻ってくる
     const lockInfo = locks.compute(this.state);
     const wd = watchdog.evaluate(this.state, lockInfo);
@@ -688,7 +729,7 @@ class Orchestrator extends EventEmitter {
     if (vkey && vkey !== this.lastViolation) this.log('watchdog', `ロック違反を検出: ${vkey}`);
     this.lastViolation = vkey;
     this.checkPlan();
-    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && !run.draining && this.activeCount() < w.limits.maxActiveAgents;
+    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && !run.memHold && !run.draining && this.activeCount() < w.limits.maxActiveAgents;
 
     // 待ち時間が来た task を戻す
     for (const t of this.state.epics.flatMap((e) => e.tasks)) {
@@ -725,13 +766,14 @@ class Orchestrator extends EventEmitter {
       if (run.frozen) next = 'budget-stopped';
       else if (run.planHold) next = 'plan-limit';
       else if (run.protectHold) next = 'protect-hold';
+      else if (run.memHold) next = 'mem-hold';
       else if (run.paused && startable) next = 'paused';
       else if (this.state.epics.some((e) => e.tasks.some((t) => t.status === 'blocked'))) next = 'waiting-human';
       else if (!startable) next = 'stuck';
     }
     if (next !== run.status) {
       run.status = next;
-      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, 'protect-hold': '保護パスの変更を検知して停止中（依頼パネルを確認）', paused: '一時停止中', running: '実行中' }[next];
+      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, 'protect-hold': '保護パスの変更を検知して停止中（依頼パネルを確認）', 'mem-hold': 'メモリ不足で新規 spawn を停止中', paused: '一時停止中', running: '実行中' }[next];
       this.log(next === 'done' ? 'done' : 'watchdog', msg);
       if (next === 'done' && !run.report) this.writeReport(false);
     }

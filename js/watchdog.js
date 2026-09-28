@@ -36,6 +36,10 @@ ATV.watchdog = (() => {
       if (!state.run?.planHold && f && L.planFiveHourStop > 0 && f.utilization >= Math.min(0.8, L.planFiveHourStop)) push('warn', `5 時間枠 ${pct(f.utilization)}`);
     }
 
+    // 2'''. メモリ
+    if (state.run?.memHold) push('crit', `メモリ不足で停止中（空き ${state.watchdog.mem?.availGb ?? '?'} GB）`);
+    else if (w.mem && w.mem.minGb > 0 && w.mem.availGb < w.mem.minGb * 2) push('warn', `メモリの空き ${w.mem.availGb} GB`);
+
     // 2''. 点検役の最後の結果
     const ins = state.inspector;
     if (ins) {

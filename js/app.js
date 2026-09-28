@@ -14,7 +14,7 @@
   const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔', waiting: '⏳' };
   const STATUS_LABEL = { ok: '✓ OK', warn: '▲ WARN', crit: '✕ CRIT' };
   const ALERT_ICON = { ok: '✓', warn: '▲', crit: '✕' };
-  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', 'protect-hold': '保護パスで停止', restarting: '再起動中', done: '完了', failed: '失敗' };
+  const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', 'protect-hold': '保護パスで停止', 'mem-hold': 'メモリ不足で停止', restarting: '再起動中', done: '完了', failed: '失敗' };
   const CRITIC_VERDICT = { change_approach: 'やり方を変える', task_is_wrong: 'task を定義し直す', needs_human: '人間の判断が必要' };
   const REQ_KIND = { install: 'インストール', auth: '認証', access: '権限', decision: '判断', other: 'その他' };
 
@@ -184,6 +184,8 @@
     setMeter('#w-tokens-bar', wd.tokenRatio);
     setMeter('#w-cost-bar', wd.costRatio);
     $('#w-active').textContent = `${wd.active} / ${w.limits.maxActiveAgents}`;
+    if (w.mem) setStat('#w-mem', `${w.mem.availGb} GB 空き`, `全 ${w.mem.totalGb} GB · ${w.mem.minGb} GB 未満で停止`);
+    $('#w-mem-wrap').hidden = !w.mem;
     // 直近 1 時間の実際の増え方（1 分ごとの累計の記録から）。金額とトークンのうち先に尽きるほう
     const r = recentRate(w);
     if (!r) setStat('#w-eta', '—', '記録がまだ少ない');
