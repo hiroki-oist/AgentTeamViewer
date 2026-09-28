@@ -30,6 +30,20 @@
   const fmtK = watchdog.fmtK;
   const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : fmtK(n));
   const hhmm = (d) => d.toTimeString().slice(0, 5);
+  const mdhm = (d) => `${d.getMonth() + 1}/${d.getDate()} ${hhmm(d)}`;
+  // 残り時間を短く: 45分 / 13時間20分 / 2日5時間
+  const fmtDur = (min) => {
+    if (!isFinite(min)) return '—';
+    if (min < 60) return `${Math.max(0, Math.round(min))}分`;
+    if (min < 48 * 60) return `${Math.floor(min / 60)}時間${Math.round(min % 60)}分`;
+    return `${Math.floor(min / 1440)}日${Math.round((min % 1440) / 60)}時間`;
+  };
+  // 監視パネルの値: 主（大きめ）+ 補足（小さく、折り返してよい）
+  const setStat = (sel, main, sub = '', title = '') => {
+    const el = $(sel);
+    el.innerHTML = `<b>${esc(main)}</b>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}`;
+    el.title = title || `${main}${sub ? ` ${sub}` : ''}`;
+  };
   const now = () => (live ? new Date() : simClock);
   const allTasks = () => state.epics.flatMap((e) => e.tasks.map((t) => ({ t, e })));
 
@@ -112,8 +126,13 @@
     setMeter('#w-tokens-bar', wd.tokenRatio);
     setMeter('#w-cost-bar', wd.costRatio);
     $('#w-active').textContent = `${wd.active} / ${w.limits.maxActiveAgents}`;
-    const eta = new Date(now().getTime() + wd.minutesLeft * 60000);
-    $('#w-eta').textContent = wd.minutesLeft <= 0 ? '枯渇' : wd.burnNow < 1 ? '—' : `${hhmm(eta)} 頃（約${Math.round(wd.minutesLeft)}分）`;
+    // トークンと金額のうち、先に尽きるほう（金額はトークンあたりの平均単価で速度を換算）
+    const usdPerTok = w.usedTokens > 0 ? w.usedCostUsd / w.usedTokens : 0;
+    const costMin = usdPerTok > 0 && wd.burnNow >= 1 ? (w.budget.costUsd - w.usedCostUsd) / (wd.burnNow * usdPerTok) : Infinity;
+    const leftMin = Math.min(wd.minutesLeft, costMin);
+    if (leftMin <= 0) setStat('#w-eta', '枯渇');
+    else if (wd.burnNow < 1) setStat('#w-eta', '—', '消費なし');
+    else setStat('#w-eta', `あと ${fmtDur(leftMin)}`, `${mdhm(new Date(now().getTime() + leftMin * 60000))} 頃`, `今の消費速度が続いた場合（${leftMin === costMin ? '金額' : 'トークン'}が先に尽きる）`);
     $('#w-burn').textContent = `現在 ${fmtK(wd.burnNow)}`;
     renderPlan(w.plan);
     $('#w-alerts').innerHTML = wd.alerts.length
@@ -129,8 +148,10 @@
       $(`#w-${sel}-wrap`).hidden = !x;
       if (!x) continue;
       const reset = x.resetsAt ? new Date(x.resetsAt) : null;
-      const when = reset ? (key === 'fiveHour' ? hhmm(reset) : `${reset.getMonth() + 1}/${reset.getDate()} ${hhmm(reset)}`) : '?';
-      $(`#w-${sel}`).textContent = `${Math.round(x.utilization * 100)}%（${when} リセット）`;
+      const pct = `${Math.round(x.utilization * 100)}%`;
+      if (!reset) setStat(`#w-${sel}`, pct);
+      else if (key === 'fiveHour') setStat(`#w-${sel}`, pct, `${hhmm(reset)} リセット`);
+      else setStat(`#w-${sel}`, pct, `リセットまで ${fmtDur((reset - now()) / 60000)}`, `${pct}（${mdhm(reset)} リセット）`);
       setMeter(`#w-${sel}-bar`, x.utilization);
     }
   }
@@ -269,10 +290,10 @@
     const r = route(e.risk);
     const rows = e.tasks.map((t) => `<tr>
         <td>${esc(t.id)}${t.kind ? `<br><span class="kind">${esc(t.kind)}</span>` : ''}</td>
-        <td>${esc(t.title)}${t.grants?.length ? `<div class="desc">追加で許可: ${esc(t.grants.join(', '))}</div>` : ''}${t.description ? `<div class="desc">${esc(t.description)}</div>` : ''}${t.summary ? `<div class="desc">→ ${esc(t.summary)}</div>` : ''}</td>
+        <td><b>${esc(t.title)}</b>${t.needs?.length ? `<div class="muted">前提: ${esc(t.needs.join(', '))}</div>` : ''}${t.grants?.length ? `<div class="desc">追加で許可: ${esc(t.grants.join(', '))}</div>` : ''}${t.description ? `<div class="desc">${esc(t.description)}</div>` : ''}${t.summary ? `<div class="desc">→ ${esc(t.summary)}</div>` : ''}</td>
         <td>${t.status}${t.status === 'failed' && live ? `<br><button class="btn" data-retry="${esc(t.id)}">再試行</button>` : ''}</td><td>${chip(t.agent)}</td>
         <td>${t.writeSet.map((f) => `<span class="file">${esc(f)}</span>`).join(' ') || '<span class="muted">読み取りのみ</span>'}</td>
-        <td>${t.attempts.map((a) => `${esc(a.model)}/${esc(a.effort)}: ${a.result}${a.note ? ` <span class="muted">(${esc(a.note.slice(0, 400))})</span>` : ''}`).join('<br>') || '—'}
+        <td>${t.attempts.map((a, i) => `<div class="att">#${i + 1} ${esc(a.model)}/${esc(a.effort)}: <b>${a.result}</b>${a.note ? ` <span class="muted">${esc(a.note.slice(0, 600))}</span>` : ''}</div>`).join('') || '—'}
           ${(t.critiques || []).map((c) => `<div class="critique"><b>⚔ critic ${esc(c.model)}/${esc(c.effort)} → ${CRITIC_VERDICT[c.verdict] || esc(c.verdict)}</b>
             <div>${esc(c.diagnosis)}</div>
             ${c.flawedAssumptions?.length ? `<div class="muted">誤った前提: ${esc(c.flawedAssumptions.join(' / '))}</div>` : ''}
@@ -287,7 +308,8 @@
         → 初期ルーティング <b>${r.model}/${r.effort}</b>（失敗ごとに 1 段昇格）。依存: ${esc(e.dependsOn.join(', ')) || 'なし'}</p>
       ${e.review ? `<p class="desc">レビュー: ${esc(e.review.note)}</p>` : e.lastReviewNote ? `<p class="desc">前回レビュー: ${esc(e.lastReviewNote)}</p>` : ''}
       ${needsHuman && live ? `<div class="actions"><button class="btn" data-approve="${esc(e.id)}">人間判断で承認して完了にする</button></div>` : ''}
-      <table><thead><tr><th>ID</th><th>タスク</th><th>状態</th><th>担当</th><th>writeSet</th><th>試行履歴</th><th>tokens</th></tr></thead><tbody>${rows}</tbody></table>`;
+      <table class="task-table"><colgroup><col class="c-id"><col class="c-task"><col class="c-st"><col class="c-agent"><col class="c-ws"><col class="c-att"><col class="c-tok"></colgroup>
+        <thead><tr><th>ID</th><th>タスク</th><th>状態</th><th>担当</th><th>writeSet</th><th>試行履歴</th><th>tokens</th></tr></thead><tbody>${rows}</tbody></table>`;
     if (!refresh) $('#detail').showModal();
   }
 
@@ -419,6 +441,20 @@
     if (live) return post('api/control', { action: state.run.paused ? 'resume' : 'pause' });
     simTimer ? stopSim() : startSim();
   });
+  // 監視役のパネル: クリックで拡大 / 縮小（ボタンやリンクのクリックは除く）
+  const watchEl = $('#watch');
+  const setExpanded = (on) => {
+    watchEl.classList.toggle('expanded', on);
+    document.querySelector('.watch-backdrop')?.remove();
+    if (on) {
+      const bd = document.createElement('div');
+      bd.className = 'watch-backdrop';
+      bd.addEventListener('click', () => setExpanded(false));
+      document.body.appendChild(bd);
+    }
+  };
+  watchEl.addEventListener('click', (ev) => { if (!ev.target.closest('button, a, input')) setExpanded(!watchEl.classList.contains('expanded')); });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') setExpanded(false); });
   $('#restart').addEventListener('click', () => {
     if (!live) return;
     if (confirm('最新版のコードで、設定と状態を引き継いで再起動します。\n実行中のエージェントが終わるのを待ってから再起動しますか？\n（キャンセルすると「今すぐ中断して再起動」を選べます）')) post('api/control', { action: 'restart', mode: 'drain' });
@@ -484,6 +520,9 @@
     if (ok) return;
     render();
     if (new URLSearchParams(location.search).has('autoplay')) startSim();
+    if (new URLSearchParams(location.search).has('watch')) setExpanded(true);
+    const ep = new URLSearchParams(location.search).get('epic');
+    if (ep) openDetail(ep);
   });
   window.addEventListener('error', (e) => { document.title = 'ERR: ' + e.message; });
 })();

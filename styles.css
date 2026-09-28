@@ -98,11 +98,22 @@ h2 { font-size: 13px; color: var(--ink-2); display: flex; gap: 8px; align-items:
 .status-pill.ok { color: var(--good); }
 .status-pill.warn { color: var(--warning); }
 .status-pill.crit { color: var(--critical); }
+/* 監視役のパネルはクリックで拡大（値を省略せずに全部見せる）。もう一度クリックか Esc で戻す */
+.watch { cursor: zoom-in; }
+.watch.expanded { position: fixed; inset: 6vh 50% auto 50%; transform: translateX(-50%); width: min(720px, 94vw); max-height: 88vh; z-index: 50; cursor: zoom-out; overflow: auto; box-shadow: 0 12px 48px rgba(0, 0, 0, .45); }
+.watch.expanded .watch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 24px; }
+.watch.expanded .stat-value { font-size: 15px; white-space: normal; overflow: visible; }
+.watch.expanded .stat-value .sub { font-size: 12px; white-space: normal; overflow: visible; }
+.watch.expanded .alerts { max-height: none; }
+.watch-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); z-index: 49; }
 .watch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 14px; flex: none; }
-.stat { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 0 6px; }
+.stat { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 0 6px; min-width: 0; }
 .stat .meter { grid-column: 1 / -1; }
 .stat-label { font-size: 11px; color: var(--muted); }
-.stat-value { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; font-variant-numeric: tabular-nums; }
+.stat-value { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; font-variant-numeric: tabular-nums; }
+/* 主の値（割合・残り時間）は必ず見せ、補足（リセット時刻など）は小さく次の行に回す */
+.stat-value b { font-weight: 600; }
+.stat-value .sub { display: block; font-size: 10.5px; font-weight: 400; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .spark-wrap { position: relative; margin-top: 4px; flex: none; }
 .spark-title { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
 .spark { width: 100%; height: 28px; display: block; margin-top: 2px; }
@@ -203,10 +214,16 @@ dialog .critique { margin-top: 6px; padding: 4px 8px; border-left: 2px solid var
 .events .t { color: var(--muted); font-variant-numeric: tabular-nums; }
 .events .k { font-size: 10.5px; color: var(--muted); }
 
-dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--ink); max-width: 860px; max-height: 86vh; overflow: auto; width: calc(100% - 32px); padding: 18px 20px; }
+dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--ink); max-width: 1720px; max-height: 86vh; overflow: auto; width: calc(100% - 32px); padding: 18px 20px; }
 dialog::backdrop { background: rgba(0, 0, 0, .45); }
 dialog h3 { font-size: 16px; margin-bottom: 6px; }
-dialog table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0 12px; }
+dialog table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0 12px; table-layout: fixed; }
+/* 詳細の表: タスク（説明・要約）と試行履歴に幅を割く */
+dialog table.task-table col.c-id { width: 76px; } dialog table.task-table col.c-st { width: 64px; } dialog table.task-table col.c-agent { width: 128px; }
+dialog table.task-table col.c-ws { width: 13%; } dialog table.task-table col.c-task { width: 44%; } dialog table.task-table col.c-att { width: 30%; } dialog table.task-table col.c-tok { width: 72px; }
+dialog table.task-table td { overflow-wrap: anywhere; }
+dialog table.task-table .file { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+dialog table.task-table .att { margin-bottom: 4px; }
 dialog th, dialog td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--grid); vertical-align: top; }
 dialog th { color: var(--muted); font-weight: 500; }
 dialog form { text-align: right; }

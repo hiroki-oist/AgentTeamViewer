@@ -132,6 +132,11 @@ ATV.dummyState = () => ({
       20100, 22800, 24500, 23100, 26400, 28900, 27200, 25600, 24100, 26800, 29300, 27700, 26200, 28400, 27100],
     usedTokens: 1_724_000,
     usedCostUsd: 31.8,
+    // プランの利用枠（デモ用。リセット時刻は表示時点からの相対）
+    plan: {
+      fiveHour: { utilization: 0.42, resetsAt: new Date(Date.now() + 2.6 * 3600e3).toISOString() },
+      sevenDay: { utilization: 0.37, resetsAt: new Date(Date.now() + 4.4 * 86400e3).toISOString() },
+    },
   },
 
   // 人間への依頼。エージェントが自力で解決できないもの（インストール・認証・権限・判断）
