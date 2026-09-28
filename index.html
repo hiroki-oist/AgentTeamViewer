@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Team Viewer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <section class="goal panel" style="grid-area: goal">
+      <div class="goal-head">
+        <span class="eyebrow" id="proj-id"></span>
+        <span class="run-pill" id="run-status"></span>
+        <a class="run-pill share" id="share-url" target="_blank" rel="noopener" hidden></a>
+        <h1 id="proj-name"></h1>
+        <div class="controls">
+          <button id="unfreeze" class="btn" type="button" hidden>予算を 1.5 倍にして再開</button>
+          <button id="sim-toggle" class="btn" type="button">▶ シミュレーション</button>
+          <button id="theme-toggle" class="btn ghost" type="button" aria-label="テーマ切替">◐</button>
+        </div>
+      </div>
+      <div class="goal-body scroll">
+        <p class="goal-text"><span class="label">目標</span><span id="proj-goal"></span></p>
+        <ul class="criteria" id="proj-criteria"></ul>
+      </div>
+      <div class="progress-row">
+        <div class="meter" aria-hidden="true"><div class="meter-fill" id="proj-progress"></div></div>
+        <span class="muted" id="proj-progress-label"></span>
+      </div>
+      <p class="now muted" id="now"></p>
+    </section>
+
+    <aside class="watch panel" id="watch" aria-label="監視役" style="grid-area: watch">
+      <div class="watch-head">
+        <span class="eyebrow">監視役</span>
+        <span class="agent-chip" id="watch-agent"></span>
+        <span class="status-pill" id="watch-status"></span>
+      </div>
+      <div class="watch-grid">
+        <div class="stat">
+          <span class="stat-label">トークン</span>
+          <span class="stat-value" id="w-tokens"></span>
+          <div class="meter small"><div class="meter-fill" id="w-tokens-bar"></div></div>
+        </div>
+        <div class="stat">
+          <span class="stat-label">コスト</span>
+          <span class="stat-value" id="w-cost"></span>
+          <div class="meter small"><div class="meter-fill" id="w-cost-bar"></div></div>
+        </div>
+        <div class="stat">
+          <span class="stat-label">稼働エージェント</span>
+          <span class="stat-value" id="w-active"></span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">予算枯渇予測</span>
+          <span class="stat-value" id="w-eta"></span>
+        </div>
+      </div>
+      <div class="spark-wrap">
+        <div class="spark-title"><span>消費速度 tok/min（直近30分）</span><span id="w-burn"></span></div>
+        <svg id="spark" class="spark" viewBox="0 0 300 28" preserveAspectRatio="none" role="img" aria-label="消費速度の推移"></svg>
+        <div class="tooltip" id="spark-tip" hidden></div>
+      </div>
+      <ul class="alerts scroll" id="w-alerts"></ul>
+    </aside>
+
+    <main class="board" id="board" style="grid-area: board">
+      <section class="column" data-status="todo"><h2>未着手 <span class="count"></span></h2><div class="cards scroll"></div></section>
+      <section class="column" data-status="running"><h2>実行中 <span class="count"></span></h2><div class="cards scroll"></div></section>
+      <section class="column" data-status="review"><h2>レビュー中 <span class="count"></span></h2><div class="cards scroll"></div></section>
+      <section class="column" data-status="done"><h2>完了 <span class="count"></span></h2><div class="cards scroll"></div></section>
+    </main>
+
+    <aside class="requests panel" aria-label="人間への依頼" style="grid-area: requests">
+      <h2>あなたへの依頼 <span class="count" id="req-count"></span> <span class="muted small-note">インストール・認証・判断など</span></h2>
+      <div class="scroll" id="requests"></div>
+    </aside>
+
+    <section class="panel locks-panel" style="grid-area: locks">
+      <h2>ファイルロック <span class="muted small-note">running / review の task が writeSet を排他保持</span></h2>
+      <div class="scroll">
+        <table class="locks">
+          <thead><tr><th>パス</th><th>保持 task</th><th>エージェント</th><th>待機中</th></tr></thead>
+          <tbody id="locks-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel events-panel" style="grid-area: events">
+      <h2>イベント</h2>
+      <ol class="events scroll" id="events"></ol>
+    </section>
+  </div>
+
+  <dialog id="detail"><div id="detail-body"></div><form method="dialog"><button class="btn">閉じる</button></form></dialog>
+
+  <script src="js/dummy-state.js"></script>
+  <script src="js/policy.js"></script>
+  <script src="js/locks.js"></script>
+  <script src="js/watchdog.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
