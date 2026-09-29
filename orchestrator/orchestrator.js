@@ -811,6 +811,7 @@ class Orchestrator extends EventEmitter {
       const i = ladder.findIndex((x) => x.effort === variant.effort);
       if (i >= 0) route = ladder[Math.min(i + failures, ladder.length - 1)];
     }
+    if (t.pinTop) route = ladder[ladder.length - 1]; // 中プロジェクトの引き継ぎは梯子の最上段
     if (!t.agent) t.agent = this.newAgent('worker', route);
     Object.assign(this.state.agents[t.agent], { runner: route.runner, model: route.model, effort: route.effort });
     const attempt = { model: route.model, effort: route.effort, runner: route.runner, result: 'running', startedAt: new Date().toISOString(), tokens: 0 };
@@ -1097,7 +1098,8 @@ class Orchestrator extends EventEmitter {
   async runReview(e) {
     e.status = 'review';
     e.tasks.forEach((t) => { t.status = 'review'; }); // レビュー中も writeSet を保持する
-    const route = policy.judge(this.ladder);
+    // 上位モデルが引き継いだ中プロジェクトは、レビューも梯子の最上段が行う
+    const route = e.takeovers ? this.ladder[this.ladder.length - 1] : policy.judge(this.ladder);
     const reviewer = this.newAgent('reviewer', route);
     e.review = { reviewer, verdict: 'pending', note: 'テスト・差分レビュー中' };
     this.log('review', `${e.id} をレビューへ（${route.model}/${route.effort}）`);
@@ -1128,10 +1130,13 @@ class Orchestrator extends EventEmitter {
         e.review = null;
         e.lastReviewNote = out.note;
         this.log('accept', `${e.id} 承認 → 完了。${oneLine(out.note)}`);
+      } else if (e.reviewRounds >= this.cfg.maxReviewRounds && (e.takeovers || 0) < (this.cfg.takeoverRounds ?? 0)) {
+        this.takeOver(e, out);
       } else if (e.reviewRounds >= this.cfg.maxReviewRounds) {
-        e.review = { reviewer, verdict: 'needs-human', note: `差し戻し上限 (${this.cfg.maxReviewRounds} 回)。${out.note}` };
+        e.review = { reviewer, verdict: 'needs-human', note: `差し戻し上限 (${this.cfg.maxReviewRounds} 回${e.takeovers ? `、上位モデルの引き継ぎ ${e.takeovers} 回` : ''})。${out.note}` };
         this.log('reject', `${e.id} 差し戻しが上限に達したため人間判断待ち`);
       } else {
+        (e.reviewNotes ||= []).push(out.note);
         e.reviewRounds++;
         out.fixes.forEach((f, i) => e.tasks.push(this.newTask({ kind: 'coder', ...f, id: `${e.id}-F${e.reviewRounds}${String.fromCharCode(97 + i)}`, risk: e.risk }, e)));
         e.status = 'running';
@@ -1142,6 +1147,30 @@ class Orchestrator extends EventEmitter {
     }
     this.changed();
     this.schedule();
+  }
+
+  // ---------- 差し戻しが上限に達したとき: 梯子の最上段が中プロジェクトを丸ごと引き継ぐ ----------
+  // 小さな修正 task を積み増す代わりに、これまでの指摘の履歴を全部渡して 1 つの task でまとめて直させる
+  takeOver(e, out) {
+    e.takeovers = (e.takeovers || 0) + 1;
+    (e.reviewNotes ||= []).push(out.note);
+    const top = this.ladder[this.ladder.length - 1];
+    const writeSet = [...new Set([...out.fixes.flatMap((f) => f.writeSet || []), ...e.tasks.flatMap((t) => t.writeSet)])];
+    const history = e.reviewNotes.map((n, i) => `${i + 1} 回目のレビュー: ${n}`).join('\n');
+    const fixes = out.fixes.map((f) => `- ${f.title}: ${f.description}`).join('\n');
+    const t = this.newTask({
+      id: `${e.id}-TO${e.takeovers}`, kind: 'coder',
+      title: `${e.title}を上位モデルが引き継いで仕上げる`,
+      brief: 'レビューで何度も差し戻されたので、上位モデルがまとめて直す',
+      description: `この中プロジェクト（${e.id} ${e.title}）は、レビューの差し戻しが上限（${this.cfg.maxReviewRounds} 回）に達した。小さな修正を重ねても通らなかったので、あなたが全体を引き継いで仕上げる。\n\nまず、なぜこれまでの修正で通らなかったのかを、レビューの指摘の履歴と実物（コード・生成物・スクリーンショット）から見極めること。同じ直し方を繰り返さず、必要なら作り方そのものを変えてよい（この中プロジェクトの writeSet の中で）。\n\nレビューの指摘の履歴:\n${history}\n\n最後のレビューが求めた修正:\n${fixes}`,
+      writeSet, risk: { complexity: 1, uncertainty: 1, blast: 1 },
+    }, e);
+    t.pinTop = true;
+    e.tasks.push(t);
+    e.status = 'running';
+    e.review = null;
+    e.lastReviewNote = out.note;
+    this.log('escalate', `${e.id} 差し戻しが上限に達した → ${top.model}/${top.effort} が引き継いで仕上げる（${e.takeovers}/${this.cfg.takeoverRounds} 回目）: ${oneLine(out.note)}`);
   }
 
   // ---------- Codex の利用上限に届いたとき ----------
