@@ -542,6 +542,8 @@ class Orchestrator extends EventEmitter {
 
   // task が始められるか: needs があればそれだけ、なければ中プロジェクトの dependsOn
   taskReady(e, t, doneEpics, doneTasks) {
+    // waitFor: worker が「この task が入るまで終われない」と宣言したもの（依存に上乗せする）
+    if ((t.waitFor || []).some((d) => !doneTasks.has(d))) return false;
     return t.needs ? t.needs.every((d) => doneTasks.has(d)) : e.dependsOn.every((d) => doneEpics.has(d));
   }
 
@@ -685,6 +687,8 @@ class Orchestrator extends EventEmitter {
   }
 
   waitReason(e, t, doneEpics, doneTasks) {
+    const wf = (t.waitFor || []).filter((d) => !doneTasks.has(d));
+    if (wf.length) return `worker said it must wait for ${wf.join(', ')}`;
     if (t.needs) {
       const miss = t.needs.filter((d) => !doneTasks.has(d));
       if (miss.length) return `needs ${miss.join(', ')}`;
@@ -706,7 +710,7 @@ class Orchestrator extends EventEmitter {
     const lines = [`FLOW: ${doneTasks.size}/${all.length} tasks done; last task finished ${Math.round((Date.now() - this.lastDoneAt()) / 60000)} min ago; active agents ${this.activeCount()}/${this.state.watchdog.limits.maxActiveAgents}`];
     // 未完の task を、何本の未完 task が（直接・間接に）待っているか
     const blocks = new Map();
-    for (const { t } of open) for (const d of t.needs || []) if (!doneTasks.has(d)) blocks.set(d, [...(blocks.get(d) || []), t.id]);
+    for (const { t } of open) for (const d of [...(t.needs || []), ...(t.waitFor || [])]) if (!doneTasks.has(d)) blocks.set(d, [...(blocks.get(d) || []), t.id]);
     const reach = (id, seen = new Set()) => { for (const x of blocks.get(id) || []) if (!seen.has(x)) { seen.add(x); reach(x, seen); } return seen; };
     const ranked = [...blocks.keys()].map((id) => [id, reach(id).size]).sort((a, b) => b[1] - a[1]).slice(0, 5);
     if (ranked.length) lines.push(`critical path (unfinished task → how many unfinished tasks wait for it, directly or not): ${ranked.map(([id, n]) => `${id}→${n}`).join(', ')}`);
@@ -1213,6 +1217,18 @@ class Orchestrator extends EventEmitter {
       }
       const blocking = this.addRequests(out.humanRequests, { from: t.agent, taskId: t.id, epicId: e.id });
 
+      // ほかの task の完了待ち: 時間で寝る代わりに依存として登録し、その task が入るまで試行を使わない
+      const all = new Map(this.state.epics.flatMap((x) => x.tasks).map((x) => [x.id, x]));
+      const waitFor = [...new Set(out.waitFor || [])].filter((id) => id !== t.id && all.has(id) && !['done', 'review', 'dropped'].includes(all.get(id).status));
+      if (!blocking.length && (out.status === 'waiting' || out.status === 'blocked') && waitFor.length) {
+        if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
+        t.waitFor = [...new Set([...(t.waitFor || []), ...waitFor])];
+        finish('deferred', `${waitFor.join(', ')} が入るのを待つ: ${oneLine(out.summary, 200)}`);
+        attempt.headline = out.headline || '';
+        t.status = 'todo';
+        this.log('wait', `${t.id} は ${waitFor.join(', ')} が統合ブランチに入るまで待つ（その間は試行を使わない）`);
+        return;
+      }
       // 自分のジョブの完了待ち（依頼のない blocked も同じ扱い）: 人間には頼まず、時間が来たら自動で再開する
       if (!blocking.length && (out.status === 'waiting' || out.status === 'blocked')) {
         if ((await this.repo.commitAll(wt, `atv: ${t.id} (途中) ${t.title}`)).length) { wt.keep = true; t.carryBranch = wt.branch; }
@@ -1419,7 +1435,7 @@ class Orchestrator extends EventEmitter {
   }
 
   previousEvidence(t) {
-    const last = [...t.attempts].reverse().find((a) => ['fail', 'blocked', 'interrupted'].includes(a.result));
+    const last = [...t.attempts].reverse().find((a) => ['fail', 'blocked', 'interrupted', 'deferred'].includes(a.result));
     return last ? `(${last.model}/${last.effort}) ${last.note}` : '';
   }
 

@@ -81,6 +81,8 @@ const SCHEMAS = {
     humanRequests: { type: 'array', items: humanRequest },
     // この run のほかの task も踏みそうな落とし穴と、その避け方（全 task の指示に載る）
     lessons: strs,
+    // ほかの task が統合ブランチに入らないと終われないときの、その task の ID（status は waiting）
+    waitFor: strs,
   }),
   critique: obj({
     verdict: { type: 'string', enum: ['change_approach', 'task_is_wrong', 'needs_human'] },
@@ -158,6 +160,7 @@ Be economical: read only what you need, and run the smallest check that proves t
 Finish with status "done" when the task is complete and verified; "waiting" if a job you started (training, rendering, a benchmark) must finish before you can go on — set waitMinutes to when it is worth checking again, and the orchestrator will resume the task then with your partial work kept (do not ask the human for this); "blocked" only if the human must do or decide something (see below; always with a concrete humanRequest); or "gave_up" if the task as written is impossible (explain why in summary). waitMinutes = 0 unless status is "waiting".
 headline: one plain sentence for the person watching the board — what is now possible or what is in the way (e.g. 「デモ 500 本を動作ごとに区切れるようになった」「Taketomi への同期はできたが、速度の計測がまだ」).
 summary: 1-3 sentences for later agents: what you did, where it is, and anything they must know (paths and names are fine here).
+waitFor: if you cannot finish until ANOTHER task of this run lands in the integration branch (e.g. it fixes a test your verification depends on), return status "waiting" with waitFor = those task ids (from the board/context). Your partial work is kept and you are resumed automatically right after they land — no attempt is used while you wait, so do not poll on a timer for another task. Use waitMinutes only for your own background jobs. [] otherwise.
 lessons: pitfalls you hit (or found) that OTHER tasks in this run are likely to hit too, each as one concrete sentence with the fix (e.g. "Unity fails to compile when the project path is long; keep temp copies under /tmp", "run Unity with nohup and return waiting instead of looping"). Not project results, not things only this task needs. [] if none.
 ${HUMAN}
 ${REQUESTS_RULE}
