@@ -270,3 +270,30 @@ dialog details > summary:focus:not(:focus-visible) { outline: none; }
 .stale { font-size: 11px; color: var(--warning); }
 .task.dropped .t-title { text-decoration: line-through; color: var(--muted); }
 .card.dropped { opacity: .6; }
+
+/* ---------- タスクグラフ ---------- */
+dialog.graph-dialog { max-width: calc(100vw - 32px); }
+.g-meter { margin: 4px 0 8px; max-width: 520px; }
+.g-summary { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 12.5px; margin: 4px 0; }
+.g-pill { border: 1px solid var(--sc); color: var(--ink); border-radius: 999px; padding: 1px 9px; font-size: 12px; }
+.g-legend { font-size: 11.5px; margin: 2px 0 8px; }
+.g-wrap { overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--page); max-height: 68vh; }
+.g-svg { display: block; }
+.g-col { font-size: 10.5px; fill: var(--muted); text-anchor: middle; }
+.g-box { fill: var(--surface); stroke: var(--sc); stroke-width: 1.2; }
+.g-node { cursor: pointer; }
+.g-node:hover .g-box { stroke-width: 2.4; }
+.g-node.crit .g-box { stroke-width: 2; filter: drop-shadow(0 0 3px var(--accent)); }
+.g-id { font-size: 11px; font-weight: 600; fill: var(--ink); }
+.g-st { font-size: 10.5px; font-weight: 500; }
+.g-blocks { font-size: 10.5px; fill: var(--serious); font-weight: 600; }
+.g-title { font-size: 12.5px; fill: var(--ink); }
+.g-sub { font-size: 10.5px; fill: var(--muted); }
+.g-edge { fill: none; stroke: var(--muted); stroke-width: 1.2; opacity: .55; }
+.g-edge.done { opacity: .25; }
+.g-edge.wait { stroke-dasharray: 5 4; stroke: var(--warning); opacity: .9; }
+.g-edge.crit { stroke: var(--accent); stroke-width: 3; opacity: .95; }
+.g-edge.hi { stroke: var(--ink); stroke-width: 2.2; opacity: 1; }
+.g-arrowhead { fill: var(--muted); }
+.g-arrowhead.crit { fill: var(--accent); }
+.g-toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; margin: 2px 0 4px; cursor: pointer; }

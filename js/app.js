@@ -125,6 +125,7 @@
     renderLocks(lockInfo);
     renderEvents();
     if (openEpic && $('#detail').open) openDetail(openEpic, true);
+    if ($('#graph').open) renderGraph();
     return wd;
   }
 
@@ -401,6 +402,142 @@
     if (!refresh) $('#detail').showModal();
   }
 
+  // ---------- タスクグラフ ----------
+  // 全 task を「いちばん早く始められる段」ごとに左から右へ並べ、前提を矢印で結ぶ。
+  // 実線 = 前提（needs。無い task は中プロジェクトの dependsOn を、前の中プロジェクトの末端 task からの矢印で表す）
+  // 点線 = worker が宣言した待ち（waitFor）。太線 = 残りの task をいちばん多く待たせている経路
+  const G_STATUS = {
+    done: ['完了', 'var(--good)'], review: ['レビュー中', 'var(--accent)'], running: ['実行中', 'var(--accent)'],
+    critique: ['批評中', 'var(--serious)'], waiting: ['ジョブ待ち', 'var(--warning)'], blocked: ['人間待ち', 'var(--critical)'],
+    failed: ['失敗', 'var(--critical)'], todo: ['未着手', 'var(--muted)'], dropped: ['やめた', 'var(--grid)'],
+  };
+
+  let graphHideDone = false;
+  try { graphHideDone = localStorage.getItem('atv-graph-hide-done') === '1'; } catch { /* 保存できない環境 */ }
+
+  function graphModel() {
+    const all = state.epics.flatMap((e) => e.tasks.map((t) => ({ ...t, epicId: e.id })));
+    // 完了を隠すときは、未完の task と、その間の依存だけを並べる（完了した前提は満たされているので線も要らない）
+    const tasks = graphHideDone ? all.filter((t) => !['done', 'review', 'dropped'].includes(t.status)) : all;
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    const epicOf = new Map(state.epics.map((e) => [e.id, e]));
+    // 中プロジェクトの末端（同じ中プロジェクトのどの task の前提にもなっていない task）
+    const sinks = (e) => {
+      const used = new Set(e.tasks.flatMap((t) => t.needs || []));
+      const s = e.tasks.filter((t) => !used.has(t.id) && t.status !== 'dropped');
+      return (s.length ? s : e.tasks).map((t) => t.id);
+    };
+    const edges = [];
+    for (const t of tasks) {
+      const deps = t.needs ? t.needs : (epicOf.get(t.epicId)?.dependsOn || []).flatMap((d) => (epicOf.get(d) ? sinks(epicOf.get(d)) : []));
+      for (const d of new Set(deps)) if (byId.has(d) && d !== t.id) edges.push({ from: d, to: t.id, kind: 'need' });
+      for (const d of t.waitFor || []) if (byId.has(d) && d !== t.id) edges.push({ from: d, to: t.id, kind: 'wait' });
+    }
+    // 段 = 前提の段 + 1（循環は打ち切る）
+    const into = new Map(tasks.map((t) => [t.id, []]));
+    for (const e of edges) into.get(e.to).push(e.from);
+    const depth = new Map();
+    const dep = (id, seen = new Set()) => {
+      if (depth.has(id)) return depth.get(id);
+      if (seen.has(id)) return 0;
+      seen.add(id);
+      const d = Math.max(-1, ...into.get(id).map((x) => dep(x, seen))) + 1;
+      depth.set(id, d);
+      return d;
+    };
+    tasks.forEach((t) => dep(t.id));
+    // 道を塞いでいる経路: 未完の task だけで、いちばん長い鎖
+    const open = (t) => !['done', 'review', 'dropped'].includes(t.status);
+    const outOf = new Map(tasks.map((t) => [t.id, []]));
+    for (const e of edges) outOf.get(e.from).push(e.to);
+    const longest = new Map();
+    const chain = (id, seen = new Set()) => {
+      if (longest.has(id)) return longest.get(id);
+      if (seen.has(id)) return [];
+      seen.add(id);
+      let best = [];
+      for (const n of outOf.get(id)) if (open(byId.get(n))) { const c = chain(n, seen); if (c.length > best.length) best = c; }
+      const r = [id, ...best];
+      longest.set(id, r);
+      return r;
+    };
+    let critical = [];
+    for (const t of tasks) if (open(t)) { const c = chain(t.id); if (c.length > critical.length) critical = c; }
+    const waitingOn = new Map();
+    for (const t of tasks) if (open(t)) for (const n of outOf.get(t.id)) if (open(byId.get(n))) waitingOn.set(t.id, (waitingOn.get(t.id) || 0) + 1);
+    return { tasks, byId, edges, depth, critical, waitingOn };
+  }
+
+  function renderGraph() {
+    const m = graphModel();
+    const everything = state.epics.flatMap((e) => e.tasks);
+    const W = 210, H = 64, GX = 64, GY = 12, PAD = 16;
+    const cols = [];
+    const epicOrder = new Map(state.epics.map((e, i) => [e.id, i]));
+    for (const t of m.tasks) (cols[m.depth.get(t.id)] ||= []).push(t);
+    cols.forEach((c) => c.sort((a, b) => epicOrder.get(a.epicId) - epicOrder.get(b.epicId) || a.id.localeCompare(b.id, 'en', { numeric: true })));
+    const pos = new Map();
+    cols.forEach((c, x) => c.forEach((t, y) => pos.set(t.id, { x: PAD + x * (W + GX), y: PAD + y * (H + GY) })));
+    const width = PAD * 2 + cols.length * (W + GX) - GX;
+    const height = PAD * 2 + Math.max(1, ...cols.map((c) => c.length)) * (H + GY) - GY;
+    const crit = new Set(m.critical.slice(0, -1).map((id, i) => `${id}>${m.critical[i + 1]}`));
+    const lockOf = (t) => t.status === 'todo' && typeof locks.canAcquire === 'function' && !locks.canAcquire(state, t);
+
+    const edgeSvg = m.edges.map((e) => {
+      const a = pos.get(e.from), b = pos.get(e.to);
+      if (!a || !b) return '';
+      const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2, mx = (x1 + x2) / 2;
+      const isCrit = crit.has(`${e.from}>${e.to}`);
+      const done = ['done', 'review'].includes(m.byId.get(e.from)?.status);
+      return `<path d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}" class="g-edge${e.kind === 'wait' ? ' wait' : ''}${isCrit ? ' crit' : ''}${done ? ' done' : ''}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" marker-end="url(#g-arrow${isCrit ? '-crit' : ''})"/>`;
+    }).join('');
+
+    const nodeSvg = m.tasks.map((t) => {
+      const p = pos.get(t.id);
+      const [label, color] = G_STATUS[t.status] || [t.status, 'var(--muted)'];
+      const a = t.attempts?.at(-1);
+      const sub = t.status === 'running' ? `${a?.model || ''}/${a?.effort || ''} · ${oneLine(a?.progress?.now || t.activity || '', 26)}`
+        : t.status === 'waiting' ? `ジョブ待ち · ${oneLine(a?.progress?.now || '', 24)}`
+        : t.status === 'todo' ? (lockOf(t) ? '🔒 担当範囲のロック待ち' : (t.waitFor?.length ? `⌛ ${t.waitFor.join(', ')} を待つ` : '前提の完了待ち'))
+        : oneLine(t.headline || t.brief || '', 30);
+      const blocks = m.waitingOn.get(t.id);
+      const onCrit = m.critical.includes(t.id);
+      return `<g class="g-node${onCrit ? ' crit' : ''}" data-id="${esc(t.id)}" data-epic="${esc(t.epicId)}" transform="translate(${p.x},${p.y})">
+        <title>${esc(t.id)} ${esc(t.title)}\n${esc(label)}${t.headline ? `\n→ ${esc(t.headline)}` : ''}${t.needs?.length ? `\n前提: ${esc(t.needs.join(', '))}` : ''}${t.waitFor?.length ? `\n待ち: ${esc(t.waitFor.join(', '))}` : ''}</title>
+        <rect width="${W}" height="${H}" rx="8" class="g-box" style="--sc:${color}"/>
+        <rect width="5" height="${H}" rx="2" style="fill:${color}"/>
+        <text x="12" y="17" class="g-id">${esc(t.id)} <tspan class="g-st" style="fill:${color}">${TASK_ICON[t.status] || ''} ${esc(label)}</tspan>${blocks ? `<tspan class="g-blocks"> ⟶${blocks}</tspan>` : ''}</text>
+        <text x="12" y="35" class="g-title">${esc(oneLine(t.title, 17))}</text>
+        <text x="12" y="53" class="g-sub">${esc(sub)}</text>
+      </g>`;
+    }).join('');
+
+    const count = {};
+    for (const t of everything) count[t.status] = (count[t.status] || 0) + 1;
+    const done = (count.done || 0) + (count.review || 0);
+    const live2 = everything.filter((t) => t.status !== 'dropped').length;
+    const ends = everything.filter((t) => ['done', 'review'].includes(t.status)).map((t) => new Date(t.attempts?.at(-1)?.endedAt || 0).getTime()).filter(Boolean);
+    const last = ends.length ? Math.max(...ends) : null;
+    const top = [...m.waitingOn.entries()].sort((a, b) => b[1] - a[1])[0];
+    const colHead = cols.map((c, x) => `<text x="${PAD + x * (W + GX) + W / 2}" y="10" class="g-col">${x + 1} 段目</text>`).join('');
+
+    $('#graph-body').innerHTML = `
+      <span class="eyebrow">タスクグラフ</span>
+      <h3>${esc(state.project?.name || '')} — 完了 ${done}/${live2}（${live2 ? Math.round((done / live2) * 100) : 0}%）</h3>
+      <div class="meter g-meter"><div class="meter-fill" style="width:${live2 ? (done / live2) * 100 : 0}%"></div></div>
+      <p class="g-summary">${Object.entries(G_STATUS).filter(([k]) => count[k]).map(([k, [l, c]]) => `<span class="g-pill" style="--sc:${c}">${TASK_ICON[k] || ''} ${l} ${count[k]}</span>`).join(' ')}
+        ${last ? `<span class="muted">最後の完了 ${fmtDur(minsSince(new Date(last).toISOString()))}前</span>` : ''}
+        ${top ? `<span class="muted">道を塞いでいる: <b>${esc(top[0])}</b>（あと ${m.critical.length} 段の鎖の先頭は ${esc(m.critical[0] || '-')}）</span>` : ''}</p>
+      <label class="g-toggle"><input type="checkbox" id="graph-hide-done" ${graphHideDone ? 'checked' : ''}> 完了した task を隠す（残りの道筋だけを見る）</label>
+      <p class="muted g-legend">左が最初、右が最後。実線 = 前提、点線 = worker が宣言した待ち、太線 = 残りをいちばん長く待たせている経路。⟶n = この task を待っている未完の task の数。箱を押すと中プロジェクトの詳細を開く。</p>
+      <div class="g-wrap"><svg class="g-svg" width="${width}" height="${height + 14}" viewBox="0 -14 ${width} ${height + 14}">
+        <defs>
+          <marker id="g-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="g-arrowhead"/></marker>
+          <marker id="g-arrow-crit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="g-arrowhead crit"/></marker>
+        </defs>
+        ${colHead}${edgeSvg}${nodeSvg}</svg></div>`;
+  }
+
   // ---------- デモ用シミュレーション（オーケストレータの代役） ----------
   const PER_MIN = { opus: 9000, sonnet: 6000, codex: 7000, haiku: 2500 };
   const USD_PER_MTOK = { opus: 25, sonnet: 10, codex: 10, haiku: 3 };
@@ -576,6 +713,22 @@
     if (card) openDetail(card.dataset.epic);
   });
   $('#detail').addEventListener('close', () => { openEpic = null; });
+  $('#graph-open').addEventListener('click', () => { renderGraph(); $('#graph').showModal(); });
+  $('#graph').addEventListener('click', (ev) => {
+    const n = ev.target.closest('.g-node');
+    if (n) { $('#graph').close(); openDetail(n.dataset.epic); }
+  });
+  $('#graph').addEventListener('change', (ev) => {
+    if (ev.target.id !== 'graph-hide-done') return;
+    graphHideDone = ev.target.checked;
+    try { localStorage.setItem('atv-graph-hide-done', graphHideDone ? '1' : '0'); } catch { /* 保存できない環境 */ }
+    renderGraph();
+  });
+  $('#graph').addEventListener('mouseover', (ev) => {
+    const n = ev.target.closest('.g-node');
+    $('#graph').querySelectorAll('.g-edge.hi').forEach((x) => x.classList.remove('hi'));
+    if (n) $('#graph').querySelectorAll(`.g-edge[data-from="${CSS.escape(n.dataset.id)}"], .g-edge[data-to="${CSS.escape(n.dataset.id)}"]`).forEach((x) => x.classList.add('hi'));
+  });
   $('#detail').addEventListener('click', (ev) => {
     const retry = ev.target.closest('[data-retry]');
     const approve = ev.target.closest('[data-approve]');
