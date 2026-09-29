@@ -680,7 +680,7 @@ class Orchestrator extends EventEmitter {
 
   // ---------- 流れ（停滞の検知と、task が何を待っているか） ----------
   lastDoneAt() {
-    const ends = this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done').map((t) => Date.parse(t.attempts.at(-1)?.endedAt || 0)).filter(Boolean);
+    const ends = this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' || t.status === 'review').map((t) => Date.parse(t.attempts.at(-1)?.endedAt || 0)).filter(Boolean);
     return Math.max(Date.parse(this.state.run.startedAt), ...ends);
   }
 
