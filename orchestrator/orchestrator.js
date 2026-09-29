@@ -275,6 +275,7 @@ class Orchestrator extends EventEmitter {
       if (e.status === 'review') { e.status = 'running'; e.review = null; }
       e.tasks = e.tasks.map((t) => {
         const n = { ...this.newTask(t, e), ...t, kind: this.kindName(t.kind), grants: t.grants || [], activity: null };
+        if (n.status !== 'done') n.writeSet = this.splitShared(n.id, n.writeSet);
         for (const a of n.attempts) if (a.result === 'running') { a.result = 'interrupted'; a.note = 'オーケストレータの再起動で中断'; }
         // 状態を保存する前に止まっていても、中断した試行のブランチが残っていれば持ち込む
         if (!n.carryBranch && n.status !== 'done' && n.attempts.length) {
@@ -769,11 +770,18 @@ class Orchestrator extends EventEmitter {
     } finally { this.reporting = false; this.changed(); }
   }
 
+  // 共有の置き場所（--split-dirs）そのものを持つ writeSet は、task ごとのサブフォルダに置き換える（ロックをぶつけない）
+  splitShared(id, writeSet) {
+    const dirs = this.cfg.splitDirs || [];
+    if (!dirs.length) return writeSet;
+    return [...new Set(writeSet.map((w) => (dirs.includes(w.endsWith('/') ? w : `${w}/`) ? `${w.replace(/\/?$/, '/')}${id}/` : w)))];
+  }
+
   newTask(t, epic) {
     return {
       id: String(t.id), title: t.title, brief: t.brief || '', headline: t.headline || '', description: t.description || '', status: 'todo', agent: null,
       kind: this.kindName(t.kind),
-      writeSet: [...new Set((t.writeSet || []).map(normPath).filter(Boolean))],
+      writeSet: this.splitShared(String(t.id), [...new Set((t.writeSet || []).map(normPath).filter(Boolean))]),
       risk: t.risk ? normRisk(t.risk) : normRisk(epic.risk),
       needs: Array.isArray(t.needs) ? [...new Set(t.needs.map(String))] : null, // null = 中プロジェクトの dependsOn に従う
       tokens: 0, costUsd: 0, attempts: [], summary: '', activity: null, grants: [],
