@@ -12,10 +12,11 @@ const oneLine = (s, n = 100) => String(s ?? '').replace(/\s+/g, ' ').trim().slic
 
 // 子プロセスを起動し、stdout を 1 行ずつ JSON として渡す
 // protector があれば、保護パスを読み取り専用にした名前空間で起動する（orchestrator/protect.js）
-function runJsonl(cmd0, args0, { cwd, input, signal, onLine, protector }) {
+function runJsonl(cmd0, args0, { cwd, input, signal, onLine, protector, env }) {
   const [cmd, args] = protector ? protector.wrap(cmd0, args0, cwd) : [cmd0, args0];
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+    // env: エージェントとその子孫（nohup で切り離したものも）に付ける目印。試行が終わったら、これで後始末する
+    const child = spawn(cmd, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: env ? { ...process.env, ...env } : process.env });
     let buf = '', stderr = '';
     const kill = () => child.kill('SIGTERM');
     signal?.addEventListener('abort', kill, { once: true });
@@ -62,7 +63,7 @@ async function claude(opts, cfg) {
   const perMessage = new Map();
   let final = null;
   const r = await runJsonl(cfg.claudeBin, args, {
-    cwd: opts.cwd, input: opts.prompt, signal: opts.signal, protector: cfg.protector,
+    cwd: opts.cwd, input: opts.prompt, signal: opts.signal, protector: cfg.protector, env: opts.env,
     onLine: (ev) => {
       if (ev.type === 'assistant' && ev.message) {
         const u = ev.message.usage;
@@ -120,7 +121,7 @@ async function codex(opts, cfg) {
 
   let tokens = 0, lastError = '';
   const r = await runJsonl(cfg.codexBin, args, {
-    cwd: opts.cwd, input: opts.prompt, signal: opts.signal, protector: cfg.protector,
+    cwd: opts.cwd, input: opts.prompt, signal: opts.signal, protector: cfg.protector, env: opts.env,
     onLine: (ev) => {
       if (ev.type === 'turn.completed' && ev.usage) {
         // input_tokens はキャッシュ分を含むので差し引く

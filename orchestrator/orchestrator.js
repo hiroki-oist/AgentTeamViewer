@@ -770,6 +770,13 @@ class Orchestrator extends EventEmitter {
     } finally { this.reporting = false; this.changed(); }
   }
 
+  // task ごとの一時フォルダ。worker の TMPDIR にして、そこに作られた一時コピーや残ったプロセスを task 単位で片付ける
+  taskTmp(t) {
+    const dir = path.join(require('node:os').tmpdir(), `atv-${this.runId}-${t.id}`);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
   // 共有の置き場所（--split-dirs）そのものを持つ writeSet は、task ごとのサブフォルダに置き換える（ロックをぶつけない）
   splitShared(id, writeSet) {
     const dirs = this.cfg.splitDirs || [];
@@ -928,6 +935,7 @@ class Orchestrator extends EventEmitter {
       }
       const res = await this.runAgent(t.agent, {
         role: 'worker', cwd: wt.path, schema: SCHEMAS.work, task: t, kind,
+        env: { ATV_TASK: taskTag(this.runId, t.id), TMPDIR: this.taskTmp(t) },
         tools: [...kind.tools, ...t.grants], disallowed: GUARD.claudeDisallowed,
         replies: this.repliesFor(t.id),
         critique: this.critiqueFor(t),
@@ -1054,6 +1062,14 @@ class Orchestrator extends EventEmitter {
       }
     } finally {
       clearInterval(progressTimer);
+      // この task が起動したまま残ったプロセス（nohup の Unity など）を止める。自分のジョブを待っているときだけ残す
+      if (attempt.result !== 'waiting') {
+        const patterns = [new RegExp(`${escRe(path.join(this.repo.dir, 'tasks', t.id))}-a\\d+(?=/|\\s|$)`), new RegExp(`${escRe(this.taskTmp(t))}(?=/|\\s|$)`)];
+        const killed = await killTaskProcs(patterns).catch(() => []);
+        if (killed.length) this.log('warn', `${t.id}: 試行のあとに残っていたプロセス ${killed.length} 本を止めた（${killed.slice(0, 3).map((k) => oneLine(k.cmd, 60)).join(' / ')}）`);
+        // task が終わったら、その一時フォルダ（Unity の一時コピーなど。数 GB になる）も消す。やり直すならキャッシュとして残す
+        if (['done', 'failed'].includes(t.status)) fs.rm(this.taskTmp(t), { recursive: true, force: true }, () => {});
+      }
       if (wt) await this.repo.removeWorktree(wt);
       this.changed();
       if (needCritic && !this.shuttingDown && !this.state.run.draining) await this.runCritic(e, t); // 再起動待ちなら critic は次のプロセスで
@@ -1409,6 +1425,41 @@ class Orchestrator extends EventEmitter {
 }
 
 class Failure extends Error {}
+
+// ---------- task が起動したプロセスの後始末 ----------
+// Claude の Bash はコマンドごとに別のプロセスグループを作り、nohup したものは親が消えて孤児になる。
+// そこで「その task の作業ツリーか一時フォルダのパスを引数に持つプロセス」を種にして、
+// 同じプロセスグループと子孫まで広げて止める（macOS では他のプロセスの環境変数が読めないため）
+const taskTag = (runId, taskId) => `${runId}/${taskId}`;
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function procTable() {
+  const txt = require('node:child_process').execFileSync('ps', ['-axww', '-o', 'pid=,ppid=,pgid=,command='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  return txt.split('\n').map((l) => l.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
+    .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), cmd: m[4] }));
+}
+
+async function killTaskProcs(patterns) {
+  const ps = procTable();
+  const byPid = new Map(ps.map((p) => [p.pid, p]));
+  // 自分（オーケストレータ）とその祖先は決して止めない
+  const protect = new Set();
+  for (let p = byPid.get(process.pid); p && !protect.has(p.pid); p = byPid.get(p.ppid)) protect.add(p.pid);
+  const myPgid = byPid.get(process.pid)?.pgid;
+  const seeds = ps.filter((p) => !protect.has(p.pid) && patterns.some((re) => re.test(p.cmd)));
+  // プロセスグループに広げるのは、グループの頭がもう居ない（nohup で孤児になった）か、頭も種のときだけ。
+  // 生きている別のシェル（人の端末など）のグループまで巻き込まないため
+  const pgids = new Set(seeds.map((p) => p.pgid).filter((g) => g > 1 && g !== myPgid && !protect.has(g) && (!byPid.has(g) || seeds.some((s) => s.pid === g))));
+  const hit = new Set(seeds.map((p) => p.pid));
+  for (const p of ps) if (pgids.has(p.pgid)) hit.add(p.pid);
+  for (let grew = true; grew;) { grew = false; for (const p of ps) if (!hit.has(p.pid) && hit.has(p.ppid)) { hit.add(p.pid); grew = true; } }
+  const found = [...hit].filter((pid) => !protect.has(pid)).map((pid) => byPid.get(pid));
+  for (const p of found) { try { process.kill(p.pid, 'SIGTERM'); } catch { /* もう無い */ } }
+  if (!found.length) return found;
+  await new Promise((r) => setTimeout(r, 5000));
+  for (const p of found) { try { process.kill(p.pid, 0); process.kill(p.pid, 'SIGKILL'); } catch { /* 止まった */ } }
+  return found;
+}
 
 // 自分のプロセスをメモリの多い順に（macOS の ps には --sort がないので -m を使う）
 function psByMemory() {
