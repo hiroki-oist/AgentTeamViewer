@@ -26,9 +26,7 @@ if (argvNow.includes('--resume') && argOf('--repo') && argOf('--run-id')) {
 }
 const argv = [...dropFlags(savedArgs), ...argvNow];
 
-const { values: v } = parseArgs({
-  args: argv,
-  options: {
+const OPTIONS = {
     repo: { type: 'string' },
     goal: { type: 'string' },
     'goal-file': { type: 'string' },
@@ -66,8 +64,8 @@ const { values: v } = parseArgs({
     tailscale: { type: 'boolean', default: false },
     'run-id': { type: 'string', default: '' },
     help: { type: 'boolean', short: 'h', default: false },
-  },
-});
+};
+const { values: v } = parseArgs({ args: argv, options: OPTIONS });
 
 if (v.help || !v.repo || !(v.goal || v['goal-file'])) {
   console.log(`Agent Team Viewer オーケストレータ
@@ -192,7 +190,13 @@ const cfg = {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'server.json'), JSON.stringify({ runId: orch.runId, pid: process.pid, port, url, tailnetUrl: shared?.url || null }, null, 1));
     // 再起動（--resume）で同じ設定を使えるよう、起動時の引数を残す。run-id は必ず固定する
-    const keep = dropFlags(argv);
+    // 起動時の引数を 1 つずつに整えて残す（--resume を重ねても増えない）。既定値のものは書かない
+    const keep = [];
+    for (const [k, o] of Object.entries(OPTIONS)) {
+      if (['resume', 'paused', 'help'].includes(k) || v[k] === undefined) continue;
+      if (o.type === 'boolean') { if (v[k]) keep.push(`--${k}`); }
+      else if (v[k] !== o.default) keep.push(`--${k}`, String(v[k]));
+    }
     if (!keep.includes('--run-id')) keep.push('--run-id', orch.runId);
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ args: keep, savedAt: new Date().toISOString() }, null, 1));
     orch.logPath = path.join(dir, 'orchestrator.log');
