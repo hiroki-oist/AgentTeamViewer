@@ -157,7 +157,7 @@ class Orchestrator extends EventEmitter {
     if (!run.memHold && info.availGb < min) {
       run.memHold = { availGb: w.mem.availGb, at: new Date().toISOString() };
       let top = '';
-      try { top = require('node:child_process').execFileSync('ps', ['-u', String(process.getuid()), '-o', 'rss=,etime=,args=', '--sort=-rss'], { encoding: 'utf8' }).split('\n').slice(0, 6).map((l) => l.trim()).filter(Boolean).map((l) => { const [rss, et, ...a] = l.split(/\s+/); return `${(Number(rss) / 1048576).toFixed(1)} GB  ${et}  ${a.join(' ').slice(0, 120)}`; }).join('\n'); } catch { /* ps がない */ }
+      try { top = psByMemory().split('\n').slice(0, 6).map((l) => l.trim()).filter(Boolean).map((l) => { const [rss, et, ...a] = l.split(/\s+/); return `${(Number(rss) / 1048576).toFixed(1)} GB  ${et}  ${a.join(' ').slice(0, 120)}`; }).join('\n'); } catch { /* ps がない */ }
       run.memHold.top = top;
       this.log('watchdog', `メモリの空きが ${w.mem.availGb} GB（下限 ${min} GB）。新規 spawn を停止`);
       this.addRequests([{ kind: 'decision', blocking: false, title: `メモリの空きが ${w.mem.availGb} GB まで減った。重いジョブを減らしてほしい`,
@@ -552,7 +552,7 @@ class Orchestrator extends EventEmitter {
     const mem = this.state.watchdog.mem;
     if (mem) lines.push(`memory: ${mem.availGb} GB free of ${mem.totalGb} GB (spawns stop below ${mem.minGb} GB)`);
     try {
-      const jobs = require('node:child_process').execFileSync('ps', ['-u', String(process.getuid()), '-o', 'rss=,etime=,args=', '--sort=-rss'], { encoding: 'utf8' }).split('\n').slice(0, 8).map((l) => l.trim()).filter(Boolean)
+      const jobs = psByMemory().split('\n').slice(0, 8).map((l) => l.trim()).filter(Boolean)
         .map((l) => { const [rss, et, ...a] = l.split(/\s+/); return `  ${(Number(rss) / 1048576).toFixed(1)} GB, running ${et}: ${a.join(' ').slice(0, 110)}`; });
       lines.push('largest processes on this machine:', ...jobs);
     } catch { /* ps がない */ }
@@ -1333,6 +1333,14 @@ class Orchestrator extends EventEmitter {
 }
 
 class Failure extends Error {}
+
+// 自分のプロセスをメモリの多い順に（macOS の ps には --sort がないので -m を使う）
+function psByMemory() {
+  const cp = require('node:child_process');
+  const base = ['-u', String(process.getuid()), '-o', 'rss=,etime=,args='];
+  const args = process.platform === 'darwin' ? ['-m', ...base] : [...base, '--sort=-rss'];
+  return cp.execFileSync('ps', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+}
 
 // Codex の利用上限に届いたときのエラー文
 const CODEX_CAP_RE = /spend cap|usage limit|usage_limit|rate limit|rate_limit|quota|insufficient_quota|limit (reached|exceeded)|hit your (\w+ )?limit|上限/i;
