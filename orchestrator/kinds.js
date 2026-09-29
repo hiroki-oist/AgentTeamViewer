@@ -63,9 +63,40 @@ function normalize(k, origin) {
     verify: VERIFY.includes(k.verify) ? k.verify : 'check',
     artifacts: list(k.artifacts).map((x) => x.replace(/^\./, '').toLowerCase()),
     requires: list(k.requires),
+    efforts: parseEfforts(k.efforts),
     instructions: String(k.instructions || '').trim(),
     origin,
   };
+}
+
+// 「作るものの種類ごとの effort」: `efforts: icon=low, texture=high` → [{ name, effort, match }]
+// match は種類を task の文面から見分けるための語（`icon=low(アイコン|icon)` のように括弧で足せる）
+const EFFORT_VALUES = ['low', 'medium', 'high', 'xhigh'];
+function parseEfforts(s) {
+  if (Array.isArray(s)) return s;
+  return list(s).map((x) => {
+    const m = x.match(/^([a-z0-9-]+)\s*=\s*([a-z]+)\s*(?:\((.*)\))?$/i);
+    if (!m || !EFFORT_VALUES.includes(m[2].toLowerCase())) return null;
+    return { name: m[1].toLowerCase(), effort: m[2].toLowerCase(), match: (m[3] || m[1]).split('|').map((w) => w.trim()).filter(Boolean) };
+  }).filter(Boolean);
+}
+
+// task がどの種類か。description の「画像の種類: <name>」を優先し、無ければ題名と説明の語で見分ける
+function effortFor(k, task) {
+  if (!k.efforts?.length) return null;
+  const text = `${task.title || ''}\n${task.description || ''}`;
+  const tag = text.match(/(?:画像の種類|種類|variant)\s*[:：]\s*([a-z0-9-]+)/i);
+  if (tag) {
+    const named = k.efforts.find((x) => x.name === tag[1].toLowerCase());
+    if (named) return named;
+  }
+  // 英字の語は単語の境界で見る（"ui" が "build" に当たらないように）。題名で決まれば説明は見ない
+  const has = (s, w) => (/^[\x00-\x7f]+$/.test(w) ? new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(s) : s.includes(w));
+  for (const s of [task.title || '', task.description || '']) {
+    const hit = k.efforts.find((x) => x.match.some((w) => has(s, w)));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 function loadDir(dir, origin) {
@@ -83,6 +114,7 @@ const hasCommand = (cmd) => {
 function serialize(k) {
   const lines = [`name: ${k.name}`, `description: ${k.description}`, `runner: ${k.runner}`, `floor: ${k.floor}`,
     `tools: ${k.tools.join(', ')}`, `verify: ${k.verify}`, `artifacts: ${k.artifacts.join(', ')}`, `requires: ${k.requires.join(', ')}`];
+  if (k.efforts?.length) lines.push(`efforts: ${k.efforts.map((x) => `${x.name}=${x.effort}(${x.match.join('|')})`).join(', ')}`);
   return `---\n${lines.join('\n')}\n---\n${k.instructions}\n`;
 }
 
@@ -126,7 +158,7 @@ class Kinds {
   catalog() {
     return [...this.map.values()].map((k) => {
       const miss = this.missing(k);
-      return `- ${k.name}: ${k.description}${k.runner !== 'any' ? ` [runner: ${k.runner}]` : ''}${miss.length ? ` (UNAVAILABLE here: needs ${miss.join(', ')})` : ''}`;
+      return `- ${k.name}: ${k.description}${k.runner !== 'any' ? ` [runner: ${k.runner}]` : ''}${k.efforts?.length ? ` [one ${k.efforts.map((x) => x.name).join(' / ')} per task; write 「画像の種類: <type>」 in the description. Effort by type: ${k.efforts.map((x) => `${x.name}=${x.effort}`).join(', ')}]` : ''}${miss.length ? ` (UNAVAILABLE here: needs ${miss.join(', ')})` : ''}`;
     }).join('\n');
   }
 
@@ -138,4 +170,4 @@ class Kinds {
   }
 }
 
-module.exports = { Kinds, GUARD, NO_AUTO_GRANT, guarded, hasCommand };
+module.exports = { effortFor, Kinds, GUARD, NO_AUTO_GRANT, guarded, hasCommand };

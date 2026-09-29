@@ -14,7 +14,7 @@ const watchdog = require('../js/watchdog.js');
 const runners = require('./runners.js');
 const { Repo, covered } = require('./git.js');
 const { SCHEMAS, prompts } = require('./prompts.js');
-const { Kinds, GUARD, NO_AUTO_GRANT, guarded } = require('./kinds.js');
+const { Kinds, GUARD, NO_AUTO_GRANT, guarded, effortFor } = require('./kinds.js');
 const { Protector } = require('./protect.js');
 
 const hhmm = (d = new Date()) => d.toTimeString().slice(0, 5);
@@ -803,14 +803,21 @@ class Orchestrator extends EventEmitter {
   async attemptTask(e, t) {
     const failures = t.attempts.filter((a) => a.result === 'fail').length;
     const kind = this.kinds.get(t.kind);
-    const route = policy.route(t.risk, failures, this.ladderFor(kind, t), kind.floor);
+    const ladder = this.ladderFor(kind, t);
+    let route = policy.route(t.risk, failures, ladder, kind.floor);
+    // 型が「作るものの種類ごとの effort」を持つなら、リスクではなく種類で最初の段を決める（失敗するたびに上げるのは同じ）
+    const variant = effortFor(kind, t);
+    if (variant) {
+      const i = ladder.findIndex((x) => x.effort === variant.effort);
+      if (i >= 0) route = ladder[Math.min(i + failures, ladder.length - 1)];
+    }
     if (!t.agent) t.agent = this.newAgent('worker', route);
     Object.assign(this.state.agents[t.agent], { runner: route.runner, model: route.model, effort: route.effort });
     const attempt = { model: route.model, effort: route.effort, runner: route.runner, result: 'running', startedAt: new Date().toISOString(), tokens: 0 };
     t.attempts.push(attempt);
     t.status = 'running'; // 同期的に running にしてロックを確保する
     this.state.agents[t.agent].state = 'active';
-    this.log(failures ? 'escalate' : 'lock', `${t.id} [${kind.name}] 開始 ${route.model}/${route.effort}${failures ? `（${failures} 回失敗後に昇格）` : ''}。ロック: ${t.writeSet.join(', ') || '(なし)'}`);
+    this.log(failures ? 'escalate' : 'lock', `${t.id} [${kind.name}${variant ? `:${variant.name}` : ''}] 開始 ${route.model}/${route.effort}${failures ? `（${failures} 回失敗後に昇格）` : ''}。ロック: ${t.writeSet.join(', ') || '(なし)'}`);
 
     let wt = null;
     let needCritic = false;
@@ -856,6 +863,13 @@ class Orchestrator extends EventEmitter {
         onActivity: (text) => { t.activity = text; },
       }, (d) => { t.tokens += d; attempt.tokens += d; });
       const granted = this.grantFromDenials(t, res.denials);
+      // Codex の利用上限（spend cap など）なら失敗に数えず、上限の解放を人間に頼んで待つ
+      if (!res.ok && route.runner === 'codex' && CODEX_CAP_RE.test(res.error || '')) {
+        finish('blocked', `Codex の利用上限: ${oneLine(res.error, 300)}`);
+        t.status = 'blocked';
+        this.askCodexCap(e, t, res.error);
+        return;
+      }
       if (!res.ok) throw new Failure(res.error);
       t.costUsd += res.costUsd || 0;
       const out = res.output;
@@ -1130,6 +1144,22 @@ class Orchestrator extends EventEmitter {
     this.schedule();
   }
 
+  // ---------- Codex の利用上限に届いたとき ----------
+  // 開いている上限の依頼が 1 件あれば、それに task を足す（上限が解放されるまで Codex の task は全部待つ）
+  askCodexCap(e, t, error) {
+    const open = this.state.requests.find((r) => r.status === 'open' && r.kind === 'limit');
+    if (open) {
+      if (!open.taskIds.includes(t.id)) open.taskIds.push(t.id);
+      open.blocking = true;
+      this.log('request', `${t.id} は人間待ち: Codex の利用上限（${open.id} に追加）`);
+      return;
+    }
+    this.addRequests([{ kind: 'limit', blocking: true, title: 'Codex の利用上限に届いた',
+      detail: `Codex がこう返しました: ${oneLine(error, 400)}\n\n上限を解放（ワークスペースの支出上限を上げる・リセットを待つなど）してから、この依頼に返答してください。止まっている Codex の task（画像生成など）が再開します。Codex を使わない task はこのまま進みます。` }],
+    { from: t.agent, taskId: t.id, epicId: e.id });
+    this.log('request', `${t.id} は人間待ち: Codex の利用上限`);
+  }
+
   // ---------- codex の sandbox で止まったとき ----------
   sandboxBlocked(route, out) {
     if (route.runner !== 'codex' || this.cfg.codexSandbox === 'danger-full-access') return false;
@@ -1274,6 +1304,9 @@ class Orchestrator extends EventEmitter {
 }
 
 class Failure extends Error {}
+
+// Codex の利用上限に届いたときのエラー文
+const CODEX_CAP_RE = /spend cap|usage limit|usage_limit|rate limit|rate_limit|quota|insufficient_quota|limit (reached|exceeded)|hit your (\w+ )?limit|上限/i;
 
 // codex の sandbox が原因らしい止まり方（worker が kind "sandbox" を付け忘れたときの拾い上げ）
 const SANDBOX_RE = /EPERM|Operation not permitted|sandbox|サンドボックス|実行制限|ローカル ?IPC|network (access )?(is )?(disabled|blocked|denied)|ネットワーク(接続|アクセス)?[^。\n]{0,12}(遮断|禁止|許可|できない)/i;

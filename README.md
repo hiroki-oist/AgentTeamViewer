@@ -77,6 +77,18 @@ Codex の worker は既定で `--codex-sandbox workspace-write` の中で動き�
 - **どの runner でもよい型**（coder など）: 人間に聞かずに、その task を Claude の梯子で再試行する（途中の変更は持ち込む）。以後この run では、どの runner でもよい型を Claude で動かす。ボードには対応不要の依頼を 1 件だけ出し、Codex を sandbox なしで使いたい場合の手順も書いておく
 - **Codex 専用の型**（illustrator など）や `--ladder codex`: Claude に回せないので、ブロッキングの依頼を出す。依頼には、`.atv/<runId>/config.json` の `args` に `"--codex-sandbox", "danger-full-access"` を足してボードの「⟳ 再起動」を押す、という具体的な手順を書く。sandbox を広げるのは人間だけが行う（atv は自分では広げない）
 
+### Codex の利用上限に届いたとき
+
+Codex が利用上限（ワークスペースの spend cap、使用量の上限、rate limit など）で動かなかったときは、失敗に数えない（梯子を上げない・critic を立てない）。その task を止めて、「Codex の利用上限に届いた」というブロッキングの依頼（種類「利用上限」）を 1 件だけ出す。上限の間に止まった Codex の task はすべてこの依頼に足していき、人間が上限を解放して返答すると、まとめて再開する。Codex を使わない task はそのまま進む。
+
+### 作るものの種類ごとの effort
+
+型の frontmatter に `efforts:` を書くと、リスクではなく「作るものの種類」で最初の effort を決める（失敗するたびに 1 段ずつ上げるのは同じ）。組み込みの illustrator は `icon=low`・`ui=medium`・`texture=high`・`hero=high`。種類は task の説明の「画像の種類: <名前>」で指定し、無ければ題名、次に説明の語（括弧の中の語。英字は単語単位）で見分ける。root には、1 つの task に 1 種類だけ入れ、説明に種類を書くよう伝えている。
+
+```
+efforts: icon=low(アイコン|icon), texture=high(テクスチャ|texture|地面)
+```
+
 ### プロジェクト報告書
 
 全部の中プロジェクトが完了すると、root が `.atv/<runId>/report.md` に報告書を書く（ボードの「📄 報告書」で開ける。途中でも「📄 報告書を作る」で、そこまでの分を作れる）。材料は task ごとの意図・各試行の結果・critic の指示・レビューの所見・人間の返答を時刻順に並べた記録と、統合ブランチの結果ファイル。何を、どういう意図でやり、どんな結果が出て、それを受けて次に何をしたかを時系列で淡々と並べる。評価・言い訳・「棄却された仮説」「今後の課題」のような節は書かせない。
