@@ -929,6 +929,20 @@ class Orchestrator extends EventEmitter {
     } finally { this.reporting = false; this.changed(); }
   }
 
+  // task が統合ブランチに入ったら、それを待って寝ている task を起こす（待つ理由に task の ID か題名が書いてあるもの）
+  wakeWaitersOf(done) {
+    const re = new RegExp(`(^|[^\\w-])${done.id.replace(/[-]/g, '\\-')}(?![\\w-])`);
+    for (const w of this.state.epics.flatMap((e) => e.tasks)) {
+      if (w.status !== 'waiting' || w === done) continue;
+      const a = w.attempts.at(-1) || {};
+      const why = `${a.note || ''}\n${a.headline || ''}\n${a.progress?.now || ''}`;
+      if (re.test(why) || (done.title && why.includes(done.title))) {
+        w.wakeAt = new Date().toISOString();
+        this.log('start', `${w.id}: 待っていた ${done.id} が統合ブランチに入ったので起こす`);
+      }
+    }
+  }
+
   // ---------- 重いキャッシュの使い回し（--warm-dirs） ----------
   // Unity の Library のような「作り直すと数十分かかるが、git の管理外で作り直せる」ものを、run ごとに温まった写しとして持つ。
   // 作業ツリーへはクローン（macOS は APFS の clonefile、Linux は reflink）で入れるので、一瞬で終わり、ディスクもほぼ使わない
@@ -1261,6 +1275,7 @@ class Orchestrator extends EventEmitter {
       if (changed.length) await this.repo.merge(wt.branch, `atv: merge ${t.id} ${t.title}`);
 
       finish('ok');
+      this.wakeWaitersOf(t);
       t.summary = out.summary;
       t.headline = out.headline || '';
       t.changed = changed;
