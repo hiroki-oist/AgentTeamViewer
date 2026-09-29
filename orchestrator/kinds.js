@@ -23,7 +23,7 @@ const GUARD = {
     'Bash(git push:*)', 'Bash(git remote:*)', 'Bash(sudo:*)', 'Bash(su:*)',
     'Bash(brew install:*)', 'Bash(apt:*)', 'Bash(apt-get:*)', 'Bash(npm publish:*)', 'Bash(gh:*)', 'Bash(docker push:*)',
   ],
-  text: 'Never: push or change git remotes, use sudo / system package managers (apt, brew install), publish packages, call paid external APIs, or read or print secrets. ssh/scp to machines named in the goal is allowed. If the task needs any of these, ask the human via humanRequests instead.',
+  text: 'Never: push or change git remotes, use sudo / system package managers (apt, brew install), publish packages, call paid external APIs, or read or print secrets. ssh/scp to machines named in the goal is allowed. If the task needs any of these, ask the human via humanRequests instead. Put every temporary copy, build output and scratch directory under $TMPDIR (a per-task directory that the orchestrator deletes when the task ends) — never directly under /tmp, /var/folders or other fixed paths, and never leave copies of the project elsewhere; disk space runs out otherwise.',
 };
 
 // ③ で自動では広げないコマンド（壊す・外と通信する・プロセスを止める）。必要なら人間への依頼を通す

@@ -61,8 +61,8 @@ const SCHEMAS = {
     actions: {
       type: 'array',
       items: obj({
-        type: { type: 'string', enum: ['rewrite_request', 'answer_request', 'nudge_task', 'restart_task', 'rewrite_text', 'ask_human'] },
-        target: str, title: str, text: str, reason: str,
+        type: { type: 'string', enum: ['rewrite_request', 'answer_request', 'nudge_task', 'restart_task', 'rewrite_text', 'ask_human', 'add_task', 'drop_need', 'wake_task', 'share_lesson'] },
+        target: str, title: str, text: str, reason: str, ids: strs, paths: strs,
         options: { type: 'array', items: option }, recommended: str,
       }),
     },
@@ -79,6 +79,8 @@ const SCHEMAS = {
     headline: str,
     summary: str,
     humanRequests: { type: 'array', items: humanRequest },
+    // この run のほかの task も踏みそうな落とし穴と、その避け方（全 task の指示に載る）
+    lessons: strs,
   }),
   critique: obj({
     verdict: { type: 'string', enum: ['change_approach', 'task_is_wrong', 'needs_human'] },
@@ -134,7 +136,7 @@ ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-function work({ goal, task, epic, context, previous, replies, critique, kind, guard, note, sandbox }) {
+function work({ goal, task, epic, context, previous, replies, critique, kind, guard, note, sandbox, lessons }) {
   return `You are a worker agent in an autonomous team. Complete exactly one task in this git worktree (your current directory).
 
 YOUR ROLE (${kind.name}): ${kind.instructions}
@@ -147,12 +149,13 @@ ${task.description}
 
 You may create or modify ONLY these paths (a trailing "/" means the whole directory): ${task.writeSet.length ? task.writeSet.join(', ') : '(none — this is a read-only investigation; report findings in summary)'}
 Changes outside this list are rejected automatically and the attempt is counted as failed.
-${note ? `\nNote from the team's inspector (it watches the board for the human):\n${note}\n` : ''}${context ? `\nFinished work you can rely on:\n${context}\n` : ''}${previous ? `\nA previous attempt at this task failed. Evidence:\n${previous}\nFix the cause instead of repeating the same approach.\n` : ''}${replies ? `\nThe human answered earlier requests:\n${replies}\n` : ''}${critique ? `\nA critic reviewed the repeated failures of this task. Its diagnosis and guidance:\n${critique}\nFollow the guidance. If you find concrete evidence that it is wrong, do what the evidence says and explain it in summary.\n` : ''}
+${note ? `\nNote from the team's inspector (it watches the board for the human):\n${note}\n` : ''}${context ? `\nFinished work you can rely on:\n${context}\n` : ''}${lessons ? `\nLESSONS LEARNED IN THIS RUN (other tasks already hit these; follow them so you do not repeat the same failure):\n${lessons}\n` : ''}${previous ? `\nA previous attempt at this task failed. Evidence:\n${previous}\nFix the cause instead of repeating the same approach.\n` : ''}${replies ? `\nThe human answered earlier requests:\n${replies}\n` : ''}${critique ? `\nA critic reviewed the repeated failures of this task. Its diagnosis and guidance:\n${critique}\nFollow the guidance. If you find concrete evidence that it is wrong, do what the evidence says and explain it in summary.\n` : ''}
 PROGRESS (the person watching the board sees this): right after you understand the task, write .atv-progress.json in your current directory as {"steps": [{"title": "...", "done": false}, ...], "now": "..."} — 3 to 7 steps in plain Japanese (what, not how; no paths), and "now" = what you are doing at the moment in one short phrase. Rewrite the file whenever a step finishes or the plan changes (add, drop, or split steps as needed), right before any command that may take more than a minute (say what it is and how long you expect), and at least every 5 minutes — a stale "now" misleads the person watching. Anything expected to take more than about 5 minutes (rendering, training, long benchmarks) should run with nohup in the background; then return status "waiting" with waitMinutes instead of sitting in the session. If a step waits on a long job, say so in "now" with the expected time (e.g. 「学習の計測待ち（あと 10 分ほど）」). The file is never committed.
 Be economical: read only what you need, and run the smallest check that proves the task works. You do not need to commit; the orchestrator commits and merges for you.
 Finish with status "done" when the task is complete and verified; "waiting" if a job you started (training, rendering, a benchmark) must finish before you can go on — set waitMinutes to when it is worth checking again, and the orchestrator will resume the task then with your partial work kept (do not ask the human for this); "blocked" only if the human must do or decide something (see below; always with a concrete humanRequest); or "gave_up" if the task as written is impossible (explain why in summary). waitMinutes = 0 unless status is "waiting".
 headline: one plain sentence for the person watching the board — what is now possible or what is in the way (e.g. 「デモ 500 本を動作ごとに区切れるようになった」「Taketomi への同期はできたが、速度の計測がまだ」).
 summary: 1-3 sentences for later agents: what you did, where it is, and anything they must know (paths and names are fine here).
+lessons: pitfalls you hit (or found) that OTHER tasks in this run are likely to hit too, each as one concrete sentence with the fix (e.g. "Unity fails to compile when the project path is long; keep temp copies under /tmp", "run Unity with nohup and return waiting instead of looping"). Not project results, not things only this task needs. [] if none.
 ${HUMAN}
 ${REQUESTS_RULE}
 ${LANG}`;
@@ -324,17 +327,24 @@ Look for:
 - headlines, briefs or request texts a person cannot read at a glance
 - anything else a careful human supervisor would flag
 
+YOUR FIRST DUTY IS KEEPING THE WORK FLOWING, AND YOU FIX THINGS YOURSELF. The person should not have to notice or solve problems. Read the FLOW section: if nothing has finished for a long time, if agents sit idle while tasks wait, or if one task blocks many others, find the root cause and remove it with the actions below. A finding without an action is only acceptable when things are fine or when the only fix is a human's. Never leave the same problem for the next inspection: if an earlier inspection (see PREVIOUS INSPECTION) already saw it and it is still there, act now.
+Typical fixes: a root cause nobody owns (e.g. a flaky test outside every task's writeSet that makes several tasks fail) → add_task to fix it and make the blocked tasks wait for it; a dependency that is not really needed → drop_need; a task waiting for a job that has clearly finished → wake_task; a pitfall several tasks hit (same error repeated, the same note you keep adding) → share_lesson so every task gets it; a task on the critical path that is stuck → restart_task with a concrete different approach.
+
 Actions you may take (target = request id like "R3" or task id like "E5-T1"):
 - rewrite_request: replace a request's title (≤40 chars) and text (detail) so the person knows exactly what to do or decide and how to answer.
 - answer_request: close a request that needs no human (only kind "decision"/"other"; never install/auth/access/sandbox). text = the answer the agent will get (what to do instead).
 - nudge_task: attach a note that the task's next attempt will read (e.g. "update progress every 5 minutes; run the rendering with nohup and return waiting").
 - restart_task: stop a running task now and retry it with the note in text; its partial work is kept. Only for a task that is clearly stuck: ${rules.restart}.
 - rewrite_text: replace a task's headline (title field = "headline") or brief (title = "brief"), or an epic's brief, with plain text in text.
-- ask_human: raise a new request when only the person can decide something (title + text with the concrete question). Give 2-4 options in "options" (label + description) with the recommended one first, and its label in "recommended".
+- add_task: add a new task that fixes a root cause no task owns. target = the epic id (or a task id in it), title (≤20 chars), text = full description for the worker, paths = its writeSet (only what it must change), ids = task ids that must wait for it (they get it as a dependency). reason = why no existing task covers it.
+- drop_need: remove dependencies of task target: ids = the task ids it should no longer wait for. Only when the task can really be done without them; reason says why.
+- wake_task: a waiting task (target) resumes now instead of at its wake time (e.g. its job has visibly finished).
+- share_lesson: text = one concrete sentence (pitfall + fix) that every task of this run will read from now on. Use it instead of repeating the same nudge_task on several tasks.
+- ask_human: last resort, only when a person must do or decide something no agent can. Raise a new request (title + text with the concrete question). Give 2-4 options in "options" (label + description) with the recommended one first, and its label in "recommended".
 - rewrite_request may also add options/recommended to a decision request that lacks them.
 Take no action when things are fine. Do not repeat an action that the board shows was already taken.
 findings: short plain notes of what you saw (also when you took no action), [] if nothing.
-improvements: problems whose cause is the orchestrator's own design (not this project), as concrete suggestions for its developer; [] if none.
+improvements: problems whose cause is the orchestrator's own design (not this project), as concrete suggestions for its developer; [] if none. Writing an improvement does not fix anything for this run: if it affects this run, also take an action (share_lesson, add_task, …) that works around it now.
 ${HUMAN}
 ${LANG}`;
 }

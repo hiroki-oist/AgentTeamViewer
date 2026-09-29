@@ -38,6 +38,7 @@ class Orchestrator extends EventEmitter {
       epics: [],
       agents: { watchdog: { role: 'watchdog', model: 'rules', effort: 'low', state: 'active' } },
       requests: [],
+      lessons: [], // この run で分かった落とし穴と避け方。全 worker の指示に載せる
       watchdog: {
         agent: 'watchdog',
         budget: { tokens: cfg.budgetTokens, costUsd: cfg.budgetUsd },
@@ -147,9 +148,18 @@ class Orchestrator extends EventEmitter {
   checkMemory() {
     let info;
     try {
-      const t = fs.readFileSync('/proc/meminfo', 'utf8');
-      const kb = (k) => Number((t.match(new RegExp(`^${k}:\\s+(\\d+)`, 'm')) || [])[1] || 0);
-      info = { availGb: kb('MemAvailable') / 1048576, totalGb: kb('MemTotal') / 1048576 };
+      if (process.platform === 'darwin') {
+        // macOS には /proc が無い。vm_stat の空き + 使っていない（inactive・speculative・purgeable）ページを「すぐ使える量」とみなす
+        const vm = require('node:child_process').execFileSync('vm_stat', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const page = Number((vm.match(/page size of (\d+)/) || [])[1] || 16384);
+        const pg = (k) => Number((vm.match(new RegExp(`${k}:\\s+(\\d+)`)) || [])[1] || 0);
+        const avail = (pg('Pages free') + pg('Pages inactive') + pg('Pages speculative') + pg('Pages purgeable')) * page;
+        info = { availGb: avail / 1073741824, totalGb: require('node:os').totalmem() / 1073741824 };
+      } else {
+        const t = fs.readFileSync('/proc/meminfo', 'utf8');
+        const kb = (k) => Number((t.match(new RegExp(`^${k}:\\s+(\\d+)`, 'm')) || [])[1] || 0);
+        info = { availGb: kb('MemAvailable') / 1048576, totalGb: kb('MemTotal') / 1048576 };
+      }
     } catch { return; }
     const w = this.state.watchdog, run = this.state.run, min = this.cfg.memMinGb || 0;
     w.mem = { availGb: Math.round(info.availGb * 10) / 10, totalGb: Math.round(info.totalGb), minGb: min };
@@ -171,6 +181,44 @@ class Orchestrator extends EventEmitter {
       run.memHold = null;
       this.schedule();
     }
+  }
+
+  // ディスクの見張り: worker が作る一時コピー（Unity の Library など、1 つ数 GB）が溜まるとディスクが満杯になり、
+  // すべての検証が ENOSPC で落ちる。空きが --disk-min-gb を下回ったら新規 spawn を止め、終わった task の一時フォルダを消す
+  checkDisk() {
+    const min = this.cfg.diskMinGb || 0;
+    let freeGb;
+    try {
+      const vols = [this.repo?.root, this.tmpBase()].filter(Boolean);
+      freeGb = Math.min(...vols.map((v) => { const s = fs.statfsSync(v); return (s.bavail * s.bsize) / 1073741824; }));
+    } catch { return; }
+    const w = this.state.watchdog, run = this.state.run;
+    w.disk = { freeGb: Math.round(freeGb * 10) / 10, minGb: min };
+    if (!(min > 0)) return;
+    if (!run.diskHold && freeGb < min) {
+      run.diskHold = { freeGb: w.disk.freeGb, at: new Date().toISOString() };
+      const freed = this.cleanFinishedTmp();
+      this.log('watchdog', `ディスクの空きが ${w.disk.freeGb} GB（下限 ${min} GB）。新規 spawn を停止し、終わった task の一時フォルダ ${freed} 個を消した`);
+      this.inspectSoon('ディスク不足', 0);
+      this.schedule();
+    } else if (run.diskHold && freeGb >= min * 1.5) {
+      this.log('watchdog', `ディスクの空きが ${w.disk.freeGb} GB に戻った。再開`);
+      run.diskHold = null;
+      this.schedule();
+    }
+  }
+
+  tmpBase() { return process.platform === 'win32' ? require('node:os').tmpdir() : '/tmp'; }
+
+  // 完了・失敗・やめた task の一時フォルダを消す（動いている・待っている task のものは残す）
+  cleanFinishedTmp() {
+    let n = 0;
+    for (const t of this.state.epics.flatMap((e) => e.tasks)) {
+      if (!['done', 'failed', 'dropped'].includes(t.status)) continue;
+      const dir = this.taskTmpPath(t);
+      if (fs.existsSync(dir)) { fs.rmSync(dir, { recursive: true, force: true }); n++; }
+    }
+    return n;
   }
 
   // 保護パスに起動時（か人間の了承時）からの変化があれば、新規 spawn を止めて知らせる
@@ -218,6 +266,8 @@ class Orchestrator extends EventEmitter {
     this.protectTimer = setInterval(() => this.checkProtected(), 5000);
     this.memTimer = setInterval(() => this.checkMemory(), 5000);
     this.checkMemory();
+    this.diskTimer = setInterval(() => this.checkDisk(), 30000);
+    this.checkDisk();
     if (this.cfg.inspectMin > 0) this.inspectTimer = setInterval(() => this.inspectSoon('定期'), this.cfg.inspectMin * 60000);
 
     // 1 分ごとに累計を記録する（予算枯渇の予測は直近 1 時間の実際の増え方から出す。24 時間ぶん持つ）
@@ -251,6 +301,7 @@ class Orchestrator extends EventEmitter {
     const s = this.state;
     s.project = prev.project;
     s.requests = prev.requests || [];
+    s.lessons = prev.lessons || [];
     s.events = [...(prev.events || []), { t: hhmm(), kind: 'start', msg: '--resume: 前の状態から再開' }];
     s.run.startedAt = prev.run?.startedAt || s.run.startedAt;
     // 人が「この枠は無視して続ける」と決めたことは、再起動しても引き継ぐ（同じ窓のリセットまで）
@@ -321,6 +372,7 @@ class Orchestrator extends EventEmitter {
     clearInterval(this.protectTimer);
     clearInterval(this.memTimer);
     clearInterval(this.inspectTimer);
+    clearInterval(this.diskTimer);
     clearTimeout(this.inspectDebounce);
     clearTimeout(this.probeTimer);
     for (const c of this.controllers) c.abort();
@@ -605,6 +657,77 @@ class Orchestrator extends EventEmitter {
     this.inspectDebounce = setTimeout(() => { this.inspectDebounce = null; this.runInspector(reason); }, wait);
   }
 
+  // ---------- 学びの共有 ----------
+  // ある task が踏んだ落とし穴を、この run のほかの全 task に伝える（同じ失敗を別の task で繰り返さない）
+  addLesson(text, from) {
+    const s = oneLine(text, 300);
+    if (!s || s.length < 8) return false;
+    const key = s.replace(/[\s、。,.!?「」（）()]/g, '').toLowerCase();
+    const list = (this.state.lessons ||= []);
+    if (list.some((l) => l.key === key || (key.length > 30 && (l.key.includes(key.slice(0, 30)) || key.includes(l.key.slice(0, 30)))))) return false;
+    list.push({ text: s, key, from, at: new Date().toISOString() });
+    if (list.length > 40) list.splice(0, list.length - 40);
+    this.log('learn', `学びを共有（${from}）: ${oneLine(s, 140)}`);
+    return true;
+  }
+
+  lessonsText() {
+    return (this.state.lessons || []).map((l) => `- ${l.text}`).join('\n');
+  }
+
+  // ---------- 流れ（停滞の検知と、task が何を待っているか） ----------
+  lastDoneAt() {
+    const ends = this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done').map((t) => Date.parse(t.attempts.at(-1)?.endedAt || 0)).filter(Boolean);
+    return Math.max(Date.parse(this.state.run.startedAt), ...ends);
+  }
+
+  waitReason(e, t, doneEpics, doneTasks) {
+    if (t.needs) {
+      const miss = t.needs.filter((d) => !doneTasks.has(d));
+      if (miss.length) return `needs ${miss.join(', ')}`;
+    } else {
+      const miss = e.dependsOn.filter((d) => !doneEpics.has(d));
+      if (miss.length) return `epic waits for ${miss.join(', ')}`;
+    }
+    const { held } = locks.compute(this.state);
+    const by = [...new Set(held.filter((h) => h.taskId !== t.id && t.writeSet.some((p) => locks.conflicts(h.path, p))).map((h) => h.taskId))];
+    if (by.length) return `writeSet locked by ${by.join(', ')}`;
+    return 'ready (waiting for a free agent slot or the next scheduler tick)';
+  }
+
+  flowDigest() {
+    const all = this.state.epics.flatMap((e) => e.tasks.map((t) => ({ e, t })));
+    const doneEpics = new Set(this.state.epics.filter((e) => e.status === 'done' || e.status === 'dropped').map((e) => e.id));
+    const doneTasks = new Set(all.filter(({ t }) => t.status === 'done' || t.status === 'review').map(({ t }) => t.id));
+    const open = all.filter(({ t }) => !['done', 'dropped', 'review'].includes(t.status));
+    const lines = [`FLOW: ${doneTasks.size}/${all.length} tasks done; last task finished ${Math.round((Date.now() - this.lastDoneAt()) / 60000)} min ago; active agents ${this.activeCount()}/${this.state.watchdog.limits.maxActiveAgents}`];
+    // 未完の task を、何本の未完 task が（直接・間接に）待っているか
+    const blocks = new Map();
+    for (const { t } of open) for (const d of t.needs || []) if (!doneTasks.has(d)) blocks.set(d, [...(blocks.get(d) || []), t.id]);
+    const reach = (id, seen = new Set()) => { for (const x of blocks.get(id) || []) if (!seen.has(x)) { seen.add(x); reach(x, seen); } return seen; };
+    const ranked = [...blocks.keys()].map((id) => [id, reach(id).size]).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (ranked.length) lines.push(`critical path (unfinished task → how many unfinished tasks wait for it, directly or not): ${ranked.map(([id, n]) => `${id}→${n}`).join(', ')}`);
+    for (const { e, t } of open) if (t.status === 'todo') lines.push(`  ${t.id} todo: ${this.waitReason(e, t, doneEpics, doneTasks)}`);
+    return lines.join('\n');
+  }
+
+  // 停滞を見つけたら点検役を呼ぶ（人には知らせず、点検役に解決させる）
+  checkStall() {
+    const run = this.state.run;
+    if (run.paused || run.draining || run.status === 'done' || !this.state.epics.length) return;
+    const now = Date.now();
+    const remaining = this.state.epics.some((e) => e.tasks.some((t) => ['todo', 'waiting', 'running', 'critique', 'blocked'].includes(t.status)));
+    if (!remaining) { this.idleSince = null; return; }
+    if (this.activeCount() === 0) this.idleSince ||= now; else this.idleSince = null;
+    const noDone = (now - this.lastDoneAt()) / 60000;
+    const idle = this.idleSince ? (now - this.idleSince) / 60000 : 0;
+    if ((noDone >= 30 || idle >= 15) && now - (this.lastStallAt || 0) >= 15 * 60000) {
+      this.lastStallAt = now;
+      this.log('watchdog', `停滞: ${Math.round(noDone)} 分 task が完了していない${idle ? `・エージェントが ${Math.round(idle)} 分 0 本` : ''} → 点検役が原因を取り除く`);
+      this.inspectSoon('停滞', 0);
+    }
+  }
+
   boardDigest() {
     const nowMs = Date.now();
     const m = (iso) => (iso ? Math.round((nowMs - Date.parse(iso)) / 60000) : null);
@@ -614,6 +737,8 @@ class Orchestrator extends EventEmitter {
     const lines = [`run: ${this.state.run.status}${this.state.run.paused ? ' (paused)' : ''}; average finished task ${avg ?? '?'} min; active agents ${this.activeCount()}/${this.state.watchdog.limits.maxActiveAgents}`];
     const mem = this.state.watchdog.mem;
     if (mem) lines.push(`memory: ${mem.availGb} GB free of ${mem.totalGb} GB (spawns stop below ${mem.minGb} GB)`);
+    const disk = this.state.watchdog.disk;
+    if (disk) lines.push(`disk: ${disk.freeGb} GB free (spawns stop below ${disk.minGb} GB). Temp copies must live under each task's $TMPDIR, which is deleted when the task ends.`);
     try {
       const jobs = psByMemory().split('\n').slice(0, 8).map((l) => l.trim()).filter(Boolean)
         .map((l) => { const [rss, et, ...a] = l.split(/\s+/); return `  ${(Number(rss) / 1048576).toFixed(1)} GB, running ${et}: ${a.join(' ').slice(0, 110)}`; });
@@ -637,6 +762,10 @@ class Orchestrator extends EventEmitter {
     const open = this.state.requests.filter((r) => r.status === 'open');
     lines.push(`OPEN REQUESTS (${open.length}):`);
     for (const r of open) lines.push(`  ${r.id} [${r.kind}${r.blocking ? ', blocking' : ''}] from ${r.from} task ${r.taskId || '-'} age ${m(r.createdAt)} min — title: ${r.title}\n    detail: ${oneLine(r.detail, 400)}`);
+    lines.push(this.flowDigest());
+    if ((this.state.lessons || []).length) lines.push('LESSONS ALREADY SHARED WITH ALL TASKS:', ...this.state.lessons.map((l) => `  - ${oneLine(l.text, 200)} (from ${l.from})`));
+    const pi = this.state.inspector;
+    if (pi?.findings?.length || pi?.actions?.length) lines.push(`PREVIOUS INSPECTION (${pi.at}, ${pi.reason}): actions: ${(pi.actions || []).join(' / ') || 'none'}; findings: ${(pi.findings || []).map((f) => `${f.target}: ${oneLine(f.problem, 120)}`).join(' / ')}`);
     lines.push('RECENT EVENTS:', ...this.state.events.slice(-15).map((x) => `  ${x.t} ${x.kind} ${oneLine(x.msg, 140)}`));
     return lines.join('\n');
   }
@@ -696,7 +825,9 @@ class Orchestrator extends EventEmitter {
           .map((x) => (Date.parse(x.attempts[x.attempts.length - 1].endedAt || 0) - Date.parse(x.attempts[0].startedAt)) / 60000).filter((x) => x > 0);
         const avg = d.length ? d.reduce((p, q) => p + q, 0) / d.length : Infinity;
         const ran = (Date.now() - Date.parse(at.startedAt)) / 60000;
-        if (stale >= 20 && ran >= 2 * avg) {
+        // ほかの task が待っている task（道を塞いでいる）は、15 分止まっていれば平均に関係なくやり直せる
+        const blocking = this.state.epics.flatMap((e) => e.tasks).some((x) => x.status === 'todo' && (x.needs || []).includes(te.t.id));
+        if ((stale >= 20 && ran >= 2 * avg) || (blocking && stale >= 15)) {
           (te.t.notes ||= []).push(String(a.text).slice(0, 600));
           te.t.abortReason = `点検役が止めてやり直し: ${oneLine(a.reason, 120)}`;
           this.ctrlByAgent?.get(te.t.agent)?.abort();
@@ -706,6 +837,31 @@ class Orchestrator extends EventEmitter {
         const field = a.title === 'brief' ? 'brief' : 'headline';
         if (te) { te.t[field] = oneLine(a.text, 120); done.push(`${te.t.id} の${field === 'brief' ? '説明' : '見出し'}を書き直した`); }
         else if (epics.get(a.target)) { epics.get(a.target).brief = oneLine(a.text, 120); done.push(`${a.target} の説明を書き直した`); }
+      } else if (a.type === 'add_task') {
+        const e = epics.get(a.target) || te?.e;
+        const ws = [...new Set((a.paths || []).map(normPath).filter(Boolean))];
+        const total = this.state.epics.reduce((n, x) => n + x.tasks.length, 0);
+        if (!e || !a.title || !a.text || !ws.length) { done.push(`task の追加は見送り（epic・題名・説明・writeSet のどれかが無い）`); continue; }
+        if (total >= this.cfg.maxTasks) { done.push(`task の追加は見送り（上限 ${this.cfg.maxTasks} 件）`); continue; }
+        const n = e.tasks.filter((x) => /-I\d+$/.test(x.id)).length + 1;
+        const nt = this.newTask({ id: `${e.id}-I${n}`, kind: 'coder', title: oneLine(a.title, 40), brief: oneLine(a.reason || a.title, 120), description: `${a.text}\n\n（点検役が追加した task。理由: ${a.reason || '-'}）`, writeSet: ws, risk: e.risk, needs: [] }, e);
+        e.tasks.push(nt);
+        if (e.status === 'done') e.status = 'running';
+        for (const id of a.ids || []) {
+          const w = tasks.get(id)?.t;
+          if (w && !['done', 'dropped'].includes(w.status)) w.needs = [...new Set([...(w.needs || []), nt.id])];
+        }
+        done.push(`${nt.id}「${nt.title}」を追加した${(a.ids || []).length ? `（${a.ids.join(', ')} が待つ）` : ''}`);
+      } else if (a.type === 'drop_need' && te) {
+        const drop = new Set(a.ids || []);
+        const before = te.t.needs || [];
+        te.t.needs = before.filter((d) => !drop.has(d));
+        if (te.t.needs.length !== before.length) done.push(`${te.t.id} の前提から ${[...drop].join(', ')} を外した（${oneLine(a.reason, 60)}）`);
+      } else if (a.type === 'wake_task' && te && te.t.status === 'waiting') {
+        te.t.wakeAt = new Date().toISOString();
+        done.push(`${te.t.id} を今すぐ再開させた（${oneLine(a.reason, 60)}）`);
+      } else if (a.type === 'share_lesson' && a.text) {
+        if (this.addLesson(a.text, 'inspector')) done.push(`学びを全 task に共有した: ${oneLine(a.text, 60)}`);
       } else if (a.type === 'ask_human') {
         this.addRequests([{ kind: 'decision', blocking: false, title: oneLine(a.title, 80), detail: String(a.text).slice(0, 2000), options: a.options, recommended: a.recommended }], { from: 'inspector', taskId: tasks.has(a.target) ? a.target : null });
         done.push(`判断を依頼した: ${oneLine(a.title, 60)}`);
@@ -774,10 +930,13 @@ class Orchestrator extends EventEmitter {
   taskTmp(t) {
     // macOS の既定の TMPDIR（/var/folders/…/T/）の下に run の ID まで入れるとパスが長くなり、Unity のコンパイルが壊れた。
     // 短い /tmp の下に、run の ID を 6 桁のハッシュにして置く
-    const base = process.platform === 'win32' ? require('node:os').tmpdir() : '/tmp';
-    const dir = path.join(base, `atv-${require('node:crypto').createHash('sha1').update(this.runId).digest('hex').slice(0, 6)}-${t.id}`);
+    const dir = this.taskTmpPath(t);
     fs.mkdirSync(dir, { recursive: true });
     return dir;
+  }
+
+  taskTmpPath(t) {
+    return path.join(this.tmpBase(), `atv-${require('node:crypto').createHash('sha1').update(this.runId).digest('hex').slice(0, 6)}-${t.id}`);
   }
 
   // 共有の置き場所（--split-dirs）そのものを持つ writeSet は、task ごとのサブフォルダに置き換える（ロックをぶつけない）
@@ -816,12 +975,13 @@ class Orchestrator extends EventEmitter {
     if (vkey && vkey !== this.lastViolation) this.log('watchdog', `ロック違反を検出: ${vkey}`);
     this.lastViolation = vkey;
     this.checkPlan();
-    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && !run.memHold && !run.draining && this.activeCount() < w.limits.maxActiveAgents;
+    const canSpawn = () => !run.paused && !run.frozen && !run.planHold && !run.protectHold && !run.memHold && !run.diskHold && !run.draining && this.activeCount() < w.limits.maxActiveAgents;
 
     // 待ち時間が来た task を戻す
     for (const t of this.state.epics.flatMap((e) => e.tasks)) {
       if (t.status === 'waiting' && Date.now() >= Date.parse(t.wakeAt || 0)) { t.status = 'todo'; t.wakeAt = null; this.log('start', `${t.id}: 待ち時間が来たので再開`); }
     }
+    this.checkStall();
     const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done' || e.status === 'dropped').map((e) => e.id));
     const doneTasks = new Set(this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' || t.status === 'review').map((t) => t.id));
     const ready = (e, t) => this.taskReady(e, t, doneIds, doneTasks);
@@ -855,13 +1015,14 @@ class Orchestrator extends EventEmitter {
       else if (run.planHold) next = 'plan-limit';
       else if (run.protectHold) next = 'protect-hold';
       else if (run.memHold) next = 'mem-hold';
+      else if (run.diskHold) next = 'disk-hold';
       else if (run.paused && startable) next = 'paused';
       else if (this.state.epics.some((e) => e.tasks.some((t) => t.status === 'blocked'))) next = 'waiting-human';
       else if (!startable) next = 'stuck';
     }
     if (next !== run.status) {
       run.status = next;
-      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, 'protect-hold': '保護パスの変更を検知して停止中（依頼パネルを確認）', 'mem-hold': 'メモリ不足で新規 spawn を停止中', paused: '一時停止中', running: '実行中' }[next];
+      const msg = { done: 'プロジェクト完了。統合ブランチをレビューしてマージしてください', 'waiting-human': '人間への依頼待ちで止まっています（依頼パネルを確認）', stuck: '進められる task がありません（失敗した task / 差し戻し上限を確認）', 'budget-stopped': '予算上限で停止しました', 'plan-limit': `利用枠で停止中（${run.planHold?.reason || ''}）`, 'protect-hold': '保護パスの変更を検知して停止中（依頼パネルを確認）', 'mem-hold': 'メモリ不足で新規 spawn を停止中', 'disk-hold': 'ディスク不足で新規 spawn を停止中', paused: '一時停止中', running: '実行中' }[next];
       this.log(next === 'done' ? 'done' : 'watchdog', msg);
       if (next === 'done' && !run.report) this.writeReport(false);
     }
@@ -942,7 +1103,7 @@ class Orchestrator extends EventEmitter {
         tools: [...kind.tools, ...t.grants], disallowed: GUARD.claudeDisallowed,
         replies: this.repliesFor(t.id),
         critique: this.critiqueFor(t),
-        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}`, note: (t.notes || []).slice(-2).join('\n'), sandbox: route.runner === 'codex' && this.cfg.codexSandbox !== 'danger-full-access' ? this.cfg.codexSandbox : null }),
+        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}`, note: (t.notes || []).slice(-2).join('\n'), lessons: this.lessonsText(), sandbox: route.runner === 'codex' && this.cfg.codexSandbox !== 'danger-full-access' ? this.cfg.codexSandbox : null }),
         onActivity: (text) => { t.activity = text; },
       }, (d) => { t.tokens += d; attempt.tokens += d; });
       const granted = this.grantFromDenials(t, res.denials);
@@ -956,6 +1117,7 @@ class Orchestrator extends EventEmitter {
       if (!res.ok) throw new Failure(res.error);
       t.costUsd += res.costUsd || 0;
       const out = res.output;
+      for (const l of out.lessons || []) this.addLesson(l, t.id);
 
       // 権限が足りずに止まっただけなら、③ で広げて人間を煩わせずにやり直す
       if (out.status === 'blocked' && granted.length && (out.humanRequests || []).every((r) => r.kind === 'access')) {
