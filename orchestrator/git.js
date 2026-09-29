@@ -73,6 +73,11 @@ class Repo {
     return changed;
   }
 
+  // この試行の枝が、起点からどのファイルを変えたか
+  async changedSince(wt) {
+    return (await git(wt.path, ['diff', '--name-only', wt.base, 'HEAD'])).out.split('\n').filter(Boolean);
+  }
+
   // 統合ブランチへのマージは 1 本ずつ直列に行う
   merge(branch, message) {
     const job = this.mergeChain.then(async () => {

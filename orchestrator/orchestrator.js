@@ -926,6 +926,31 @@ class Orchestrator extends EventEmitter {
     } finally { this.reporting = false; this.changed(); }
   }
 
+  async relocateShared(wt, t, outside) {
+    const moved = [];
+    for (const dir of this.cfg.splitDirs || []) {
+      const mine = `${dir}${t.id}/`;
+      if (!t.writeSet.includes(mine)) continue;
+      for (const f of outside) {
+        if (!f.startsWith(dir) || f.startsWith(mine)) continue;
+        const src = path.join(wt.path, f);
+        if (!fs.existsSync(src)) continue; // 消しただけのものは動かせない（外の変更のまま）
+        const dst = path.join(wt.path, mine, f.slice(dir.length));
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.renameSync(src, dst);
+        moved.push(f);
+      }
+    }
+    if (moved.length) {
+      // 移した元のファイルが以前からあったものなら、元に戻す（消したことにしない）
+      for (const f of moved) {
+        const r = require('node:child_process').spawnSync('git', ['-C', wt.path, 'cat-file', '-e', `${wt.base}:${f}`]);
+        if (r.status === 0) require('node:child_process').spawnSync('git', ['-C', wt.path, 'checkout', wt.base, '--', f]);
+      }
+    }
+    return moved;
+  }
+
   // task ごとの一時フォルダ。worker の TMPDIR にして、そこに作られた一時コピーや残ったプロセスを task 単位で片付ける
   taskTmp(t) {
     // macOS の既定の TMPDIR（/var/folders/…/T/）の下に run の ID まで入れるとパスが長くなり、Unity のコンパイルが壊れた。
@@ -1176,7 +1201,14 @@ class Orchestrator extends EventEmitter {
       }
       if (out.status === 'gave_up') throw new Failure(`エージェントが断念: ${out.summary}`);
 
-      const changed = await this.repo.commitAll(wt, `atv: ${t.id} ${t.title}`);
+      let changed = await this.repo.commitAll(wt, `atv: ${t.id} ${t.title}`);
+      // 共有の置き場所（--split-dirs）の直下に書いたものは、失敗にせず task のサブフォルダへ移す
+      // （計画や説明に古い置き場所が書いてあると、worker はそちらに書いてしまう）
+      const moved = await this.relocateShared(wt, t, changed.filter((f) => !covered(f, t.writeSet)));
+      if (moved.length) {
+        changed = await this.repo.commitAll(wt, `atv: ${t.id} 共有の置き場所のファイルを ${t.id}/ に移す`).then(() => this.repo.changedSince(wt));
+        this.log('warn', `${t.id}: 共有の置き場所の直下に書かれた ${moved.length} 件を ${t.id}/ に移した（${moved.slice(0, 3).join(', ')}）`);
+      }
       const outside = changed.filter((f) => !covered(f, t.writeSet));
       if (outside.length) throw new Failure(`writeSet 外を変更: ${outside.slice(0, 5).join(', ')}`);
       if (!changed.length && t.writeSet.length) throw new Failure(`変更がない（summary: ${out.summary}）`);

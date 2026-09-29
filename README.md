@@ -95,7 +95,7 @@ efforts: icon=low(アイコン|icon), texture=high(テクスチャ|texture|地�
 
 ### 共有の置き場所でロックをぶつけない（--split-dirs）
 
-確認用のスクリーンショット置き場のように、多くの task が「そこに何か置く」だけの場所が writeSet に入ると、ロックがぶつかって task が 1 本ずつしか進まない。`--split-dirs "Docs/Previews/"` のように指定すると、writeSet にその場所そのものがある task は `Docs/Previews/<taskId>/` に置き換える（計画のときも、`--resume` で読み直したときも）。worker にはこの writeSet が伝わるので、自分のサブフォルダに書く。
+確認用のスクリーンショット置き場のように、多くの task が「そこに何か置く」だけの場所が writeSet に入ると、ロックがぶつかって task が 1 本ずつしか進まない。`--split-dirs "Docs/Previews/"` のように指定すると、writeSet にその場所そのものがある task は `Docs/Previews/<taskId>/` に置き換える（計画のときも、`--resume` で読み直したときも）。worker にはこの writeSet が伝わるので、自分のサブフォルダに書く。それでも計画の説明に古い置き場所が書いてあって、worker が `Docs/Previews/` の直下に書いてしまったときは、失敗にせず atv が `Docs/Previews/<taskId>/` へ移してからコミットする（前からあったファイルは元の中身に戻す）。
 
 ### task が残したプロセスと一時フォルダの後始末
 
