@@ -772,7 +772,10 @@ class Orchestrator extends EventEmitter {
 
   // task ごとの一時フォルダ。worker の TMPDIR にして、そこに作られた一時コピーや残ったプロセスを task 単位で片付ける
   taskTmp(t) {
-    const dir = path.join(require('node:os').tmpdir(), `atv-${this.runId}-${t.id}`);
+    // macOS の既定の TMPDIR（/var/folders/…/T/）の下に run の ID まで入れるとパスが長くなり、Unity のコンパイルが壊れた。
+    // 短い /tmp の下に、run の ID を 6 桁のハッシュにして置く
+    const base = process.platform === 'win32' ? require('node:os').tmpdir() : '/tmp';
+    const dir = path.join(base, `atv-${require('node:crypto').createHash('sha1').update(this.runId).digest('hex').slice(0, 6)}-${t.id}`);
     fs.mkdirSync(dir, { recursive: true });
     return dir;
   }
