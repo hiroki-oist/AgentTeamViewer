@@ -117,6 +117,7 @@ const ladder = v.ladder !== 'auto' ? v.ladder : available.claude && available.co
 const cfg = {
   repo: path.resolve(v.repo),
   goal: v.goal || fs.readFileSync(v['goal-file'], 'utf8').trim(),
+  goalFile: v['goal-file'] ? path.resolve(v['goal-file']) : null,
   ladder,
   available,
   check: v.check,

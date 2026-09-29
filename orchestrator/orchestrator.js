@@ -532,6 +532,66 @@ class Orchestrator extends EventEmitter {
     this.changed();
   }
 
+  // ---------- 計画の立て直し ----------
+  // 完了した task と統合ブランチは残し、goal を読み直して、残りの task を「残す / やめる / 足す」に分ける。
+  // 立て直した計画は一時停止の状態で出し、人が確かめてから再開する
+  async replan(reason) {
+    const run = this.state.run;
+    if (this.replanning) throw new Error('立て直しの最中');
+    if (this.activeCount() > 0 && !run.paused) throw new Error('先に一時停止し、動いているエージェントが終わるのを待つこと');
+    this.replanning = true;
+    run.paused = true;
+    try {
+      if (this.cfg.goalFile) { try { this.cfg.goal = fs.readFileSync(this.cfg.goalFile, 'utf8').trim(); this.state.project.goal = this.cfg.goal; } catch { /* 読めなければ前の goal */ } }
+      const route = policy.judge(this.ladder);
+      const agent = this.rootAgent || this.newAgent('lead', route);
+      Object.assign(this.state.agents[agent], { runner: route.runner, model: route.model, effort: route.effort });
+      this.log('plan', `計画を立て直し中（${route.model}/${route.effort}）: ${oneLine(reason, 120)}`);
+      const digest = this.state.epics.map((e) => `EPIC ${e.id} [${e.status}] ${e.title} — ${e.brief || ''}\n${e.tasks.map((t) => `  - ${t.id} [${t.status}] ${t.title} — ${t.brief || ''}${t.summary ? ` — result: ${oneLine(t.summary, 400)}` : ''}${t.needs?.length ? ` (needs ${t.needs.join('+')})` : ''}`).join('\n')}`).join('\n');
+      const nextEpic = `E${Math.max(0, ...this.state.epics.map((e) => Number(String(e.id).replace(/\D/g, '')) || 0)) + 1}`;
+      const res = await this.runAgent(agent, { role: 'planner', cwd: this.repo.mainPath, readOnly: true, schema: SCHEMAS.replan,
+        prompt: prompts.replan({ goal: this.cfg.goal, reason, state: digest, catalog: this.kinds.catalog(), nextEpic, maxTasks: this.cfg.maxTasks }) });
+      if (!res.ok) { this.log('fail', `計画の立て直しに失敗: ${oneLine(res.error)}`); return; }
+      const out = res.output;
+      const keep = new Set(out.keep || []);
+      const dropped = [];
+      for (const e of this.state.epics) for (const t of e.tasks) {
+        if (t.status === 'done' || keep.has(t.id)) continue;
+        const why = (out.drop || []).find((d) => d.id === t.id)?.reason || '立て直しで不要になった';
+        t.status = 'dropped'; t.droppedReason = why; t.wakeAt = null;
+        dropped.push(t.id);
+      }
+      for (const e of this.state.epics) if (e.status !== 'done' && e.tasks.every((t) => t.status === 'dropped' || t.status === 'done')) e.status = e.tasks.some((t) => t.status === 'done') ? 'done' : 'dropped';
+      const known = new Set(this.state.epics.map((e) => e.id));
+      const fresh = this.validatePlan((out.epics || []).filter((e) => !known.has(String(e.id))));
+      // 既存の epic や task を dependsOn / needs に書いてよい（validatePlan は新しい epic の中だけを見るので、ここで戻す）
+      const allTasks = new Set([...this.state.epics.flatMap((e) => e.tasks.map((t) => t.id)), ...fresh.flatMap((e) => e.tasks.map((t) => t.id))]);
+      const allEpics = new Set([...known, ...fresh.map((e) => e.id)]);
+      for (const src of out.epics || []) {
+        const e = fresh.find((x) => x.id === String(src.id));
+        if (!e) continue;
+        e.dependsOn = (src.dependsOn || []).filter((d) => allEpics.has(d) && d !== e.id);
+        for (const st of src.tasks || []) { const t = e.tasks.find((x) => x.id === st.id); if (t && Array.isArray(st.needs)) t.needs = st.needs.filter((d) => allTasks.has(d) && d !== t.id); }
+        e.lead = agent;
+      }
+      this.state.epics.push(...fresh);
+      // 残した task が、やめた task を前提にしていたら外す（永久に満たされない前提で止まらないように）
+      const droppedSet = new Set(dropped);
+      for (const t of this.state.epics.flatMap((e) => e.tasks)) {
+        const gone = (t.needs || []).filter((d) => droppedSet.has(d));
+        if (gone.length) { t.needs = t.needs.filter((d) => !droppedSet.has(d)); this.log('warn', `${t.id}: やめた task（${gone.join(', ')}）を前提から外した`); }
+      }
+      this.cleanNeeds(this.state.epics);
+      this.addRequests(out.humanRequests, { from: agent });
+      const n = fresh.reduce((a, e) => a + e.tasks.length, 0);
+      run.replan = { at: new Date().toISOString(), reason, note: out.note, kept: [...keep], dropped, added: fresh.map((e) => e.id) };
+      this.log('plan', `計画を立て直した: 残す ${keep.size} / やめる ${dropped.length} / 新しい中プロジェクト ${fresh.length} 件（task ${n} 件）。${oneLine(out.note, 200)}`);
+      this.addRequests([{ kind: 'decision', blocking: false, title: '立て直した計画を確かめて再開してほしい',
+        detail: `${out.note}\n\nやめた task: ${dropped.join(', ') || 'なし'}\n新しい中プロジェクト: ${fresh.map((e) => `${e.id} ${e.title}`).join(' / ') || 'なし'}\n\n一時停止しています。よければボードの ▶ 再開を押してください。`,
+        options: [{ label: 'この計画で再開', description: '▶ 再開を押すのと同じ' }, { label: '直してほしい', description: '返答欄に直してほしい点を書く。それを理由にもう一度立て直す' }], recommended: 'この計画で再開' }], { from: agent });
+    } finally { this.replanning = false; this.changed(); this.schedule(); }
+  }
+
   // ---------- 点検役 ----------
   // 人がボードで気づくはずのおかしさ（読めない依頼、止まった進み具合、長すぎる task…）を先に見つけて、許された範囲で直す
   inspectSoon(reason, delayMs = 0) {
@@ -742,7 +802,7 @@ class Orchestrator extends EventEmitter {
     for (const t of this.state.epics.flatMap((e) => e.tasks)) {
       if (t.status === 'waiting' && Date.now() >= Date.parse(t.wakeAt || 0)) { t.status = 'todo'; t.wakeAt = null; this.log('start', `${t.id}: 待ち時間が来たので再開`); }
     }
-    const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done').map((e) => e.id));
+    const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done' || e.status === 'dropped').map((e) => e.id));
     const doneTasks = new Set(this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' || t.status === 'review').map((t) => t.id));
     const ready = (e, t) => this.taskReady(e, t, doneIds, doneTasks);
     for (const e of this.state.epics) {
@@ -760,14 +820,15 @@ class Orchestrator extends EventEmitter {
         }
         this.runTask(e, t);
       }
-      if (e.tasks.every((t) => t.status === 'done') && canSpawn()) this.runReview(e);
+      if (e.tasks.every((t) => t.status === 'done' || t.status === 'dropped') && e.tasks.some((t) => t.status === 'done') && canSpawn()) this.runReview(e);
+      else if (e.tasks.length && e.tasks.every((t) => t.status === 'dropped')) { e.status = 'dropped'; this.changed(); }
     }
 
     // 全体の状態（ループは止めない。依頼が解決されたり再開されたりしたら続きから動く）
     const busy = this.state.epics.some((e) => e.status === 'review' && e.review?.verdict === 'pending') ||
       this.state.epics.some((e) => e.tasks.some((t) => t.status === 'running' || t.status === 'critique' || t.status === 'waiting'));
     let next = 'running';
-    if (this.state.epics.length && this.state.epics.every((e) => e.status === 'done')) next = 'done';
+    if (this.state.epics.length && this.state.epics.every((e) => e.status === 'done' || e.status === 'dropped')) next = 'done';
     else if (!busy) {
       const startable = this.state.epics.some((e) => ['running', 'todo'].includes(e.status) && e.tasks.some((t) => t.status === 'todo' && ready(e, t)));
       if (run.frozen) next = 'budget-stopped';
@@ -1249,6 +1310,8 @@ class Orchestrator extends EventEmitter {
       r.choice = option;
       reply = `「${option}」を選択${o?.description ? `（${o.description}）` : ''}${reply ? `。補足: ${reply}` : ''}`;
       if (option === 'この task を諦める') dismiss = true;
+      if (option === 'この計画で再開') setTimeout(() => this.control('resume'), 0);
+      if (option === '直してほしい') setTimeout(() => this.replan(`前の立て直しへの指摘: ${reply}`).catch((e) => this.log('fail', e.message)), 0);
     }
     r.status = dismiss ? 'dismissed' : 'resolved';
     r.reply = String(reply).slice(0, 2000);
@@ -1305,6 +1368,9 @@ class Orchestrator extends EventEmitter {
       if (t.status === 'running' && this.ctrlByAgent?.get(t.agent)) { t.abortReason = '人の指示でやり直し'; this.ctrlByAgent.get(t.agent).abort(); }
       else if (['failed', 'blocked', 'waiting'].includes(t.status)) { t.status = 'todo'; t.wakeAt = null; }
       this.log('control', `${t.id} を人の指示でやり直し${arg.note ? `: ${oneLine(arg.note, 100)}` : ''}`);
+    } else if (action === 'replan') {
+      this.replan(String(arg.reason || ''));
+      return;
     } else if (action === 'protect-ok') {
       if (!run.protectHold) throw new Error('保護パスで止まっていない');
       run.protectHold = null;

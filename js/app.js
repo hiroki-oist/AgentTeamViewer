@@ -11,7 +11,7 @@
   let openEpic = null;
 
   const EFFORT_PIPS = { low: 1, medium: 2, high: 3, xhigh: 4, max: 4 };
-  const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔', waiting: '⏳' };
+  const TASK_ICON = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✕', blocked: '⏸', critique: '⚔', waiting: '⏳', dropped: '⊘' };
   const STATUS_LABEL = { ok: '✓ OK', warn: '▲ WARN', crit: '✕ CRIT' };
   const ALERT_ICON = { ok: '✓', warn: '▲', crit: '✕' };
   const RUN_LABEL = { starting: '起動中', planning: '計画中', running: '実行中', paused: '一時停止', 'waiting-human': '人間待ち', stuck: '行き詰まり', 'budget-stopped': '予算で停止', 'plan-limit': '利用枠で停止', 'protect-hold': '保護パスで停止', 'mem-hold': 'メモリ不足で停止', restarting: '再起動中', done: '完了', failed: '失敗' };
@@ -31,6 +31,7 @@
   const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : fmtK(n));
   const hhmm = (d) => d.toTimeString().slice(0, 5);
   const oneLine = (s, n) => { const x = String(s ?? '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n)}…` : x; };
+  const DROPPED_NOTE = (t) => (t.status === 'dropped' ? ` <span class="muted">（やめた: ${esc(t.droppedReason || '')}）</span>` : '');
   const RESULT_LABEL = { ok: '成功', fail: '失敗', blocked: '人間待ち', interrupted: '中断', running: '実行中', waiting: 'ジョブ待ち', waited: 'ジョブ待ち' };
 
   // 予算の減り方: 1 分ごとの累計の記録のうち、直近 60 分の最初と今の差から（記録が 2 分未満なら出さない）
@@ -249,7 +250,7 @@
 
     for (const col of document.querySelectorAll('.column')) {
       const status = col.dataset.status;
-      const epics = state.epics.filter((e) => e.status === status);
+      const epics = state.epics.filter((e) => e.status === status || (status === 'done' && e.status === 'dropped'));
       col.querySelector('.count').textContent = epics.length;
       col.querySelector('.cards').innerHTML = epics.map((e) => {
         const done = e.tasks.filter((t) => t.status === 'done').length;
@@ -281,7 +282,7 @@
             </li>`;
         }).join('');
         const cls = [pendingDeps.length && 'blocked-deps', e.tasks.some((t) => t.status === 'failed') && 'has-failed', e.tasks.some((t) => t.status === 'blocked') && 'has-blocked'].filter(Boolean).join(' ');
-        return `<article class="card ${cls}" data-epic="${esc(e.id)}">
+        return `<article class="card ${cls} ${e.status === 'dropped' ? 'dropped' : ''}" data-epic="${esc(e.id)}">
             <div class="card-head"><span class="card-id">${esc(e.id)}</span><span class="card-title">${esc(e.title)}</span></div>
             ${e.brief ? `<div class="card-brief">${esc(e.brief)}</div>` : ''}
             <div class="card-meta">
@@ -368,7 +369,7 @@
     const r = route(e.risk);
     const rows = e.tasks.map((t) => `<tr>
         <td>${esc(t.id)}${t.kind ? `<br><span class="kind">${esc(t.kind)}</span>` : ''}</td>
-        <td><b>${esc(t.title)}</b>${t.brief ? `<div class="brief">${esc(t.brief)}</div>` : ''}
+        <td><b>${esc(t.title)}</b>${DROPPED_NOTE(t)}${t.brief ? `<div class="brief">${esc(t.brief)}</div>` : ''}
           ${t.headline ? `<div class="headline">→ ${esc(t.headline)}</div>` : ''}
           ${t.needs?.length ? `<div class="muted">前提: ${esc(t.needs.join(', '))}</div>` : ''}
           ${t.description || t.summary || t.grants?.length ? `<details><summary>エージェント向けの詳細</summary>

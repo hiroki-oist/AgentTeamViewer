@@ -268,3 +268,5 @@ dialog .actions { display: flex; gap: 6px; justify-content: flex-end; margin-bot
 dialog details > summary:focus:not(:focus-visible) { outline: none; }
 .task .waiting { color: var(--ink-2); font-size: 11px; }
 .stale { font-size: 11px; color: var(--warning); }
+.task.dropped .t-title { text-decoration: line-through; color: var(--muted); }
+.card.dropped { opacity: .6; }

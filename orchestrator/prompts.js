@@ -39,6 +39,20 @@ const SCHEMAS = {
   // 既存の計画に task 単位の依存を補う（--resume で古い計画を読んだとき）
   needs: obj({ tasks: { type: 'array', items: obj({ id: str, needs: strs, reason: str }) } }),
   report: obj({ markdown: str }),
+  // 計画の立て直し: 残りの task をそのまま残すか、やめるか、新しく足すか
+  replan: obj({
+    note: str,
+    keep: strs,
+    drop: { type: 'array', items: obj({ id: str, reason: str }) },
+    epics: {
+      type: 'array',
+      items: obj({
+        id: str, title: str, brief: str, dependsOn: strs, risk,
+        tasks: { type: 'array', items: obj({ id: str, title: str, brief: str, description: str, kind: str, writeSet: strs, needs: strs, risk }) },
+      }),
+    },
+    humanRequests: { type: 'array', items: humanRequest },
+  }),
   // 点検役の一段目（小さいモデル）: 異常の可能性があるかだけを判定する
   triage: obj({ suspicious: { type: 'boolean' }, reasons: strs }),
   // 点検役: ボードを人の目線で読み、おかしなところを見つけて、許された範囲で直す
@@ -252,6 +266,31 @@ Write the report as Markdown in "markdown". It is a plain factual log of what wa
 ${LANG}`;
 }
 
+// 計画の立て直し
+function replan({ goal, reason, state, catalog, nextEpic, maxTasks }) {
+  return `You are the root orchestrator of an autonomous agent team. The project is already under way; the human found that part of the plan rests on a wrong assumption and asked you to re-plan the rest. Finished work stays (it is merged in this checkout, read-only for you); re-plan only what is not done.
+
+UPDATED GOAL:
+${goal}
+
+WHY THE PLAN CHANGES (from the human):
+${reason}
+
+CURRENT PLAN (epic, then tasks: id [status] title — brief — result summary for finished tasks):
+${state}
+
+Inspect the repository (read-only) as needed. Then decide, for every task that is not done:
+- keep: task ids that remain valid as written (they keep their progress).
+- drop: task ids that no longer make sense, each with a short reason.
+- epics: NEW epics with NEW tasks for the corrected work, including redoing finished work that the correction invalidates (say so in the description: which existing files to change and why). Ids for new epics start at ${nextEpic}; tasks "<epicId>-T1", …. dependsOn / needs may reference existing epic and task ids (finished ones count as done). Keep kept tasks consistent: if a kept task needs something that a new task produces, put that in the new task and mention it in note.
+- note: 2-4 plain sentences for the human: what changes and why.
+Same rules as the original plan: writeSet per task, precise description of "done" and how to verify it, honest risk, kind from this catalog:
+${catalog}
+At most ${maxTasks} new tasks. Fields a person reads (title, brief, note) must be plain language.
+${REQUESTS_RULE}
+${LANG}`;
+}
+
 // 点検役の一段目: 安く速く「怪しいところがあるか」だけを見る
 function triage({ board }) {
   return `You screen the board of an autonomous agent team for a human supervisor. Decide only whether something MAY be wrong and deserves a closer look by a stronger model. Do not fix anything.
@@ -300,4 +339,4 @@ ${HUMAN}
 ${LANG}`;
 }
 
-module.exports = { SCHEMAS, HUMAN, prompts: { plan, work, critique, review, needs, briefs, report, triage, inspect } };
+module.exports = { SCHEMAS, HUMAN, prompts: { plan, work, critique, review, needs, briefs, report, triage, inspect, replan } };
