@@ -1057,6 +1057,7 @@ class Orchestrator extends EventEmitter {
       if (t.status === 'waiting' && Date.now() >= Date.parse(t.wakeAt || 0)) { t.status = 'todo'; t.wakeAt = null; this.log('start', `${t.id}: 待ち時間が来たので再開`); }
     }
     this.checkStall();
+    this.deferToTakeovers();
     const doneIds = new Set(this.state.epics.filter((e) => e.status === 'done' || e.status === 'dropped').map((e) => e.id));
     const doneTasks = new Set(this.state.epics.flatMap((e) => e.tasks).filter((t) => t.status === 'done' || t.status === 'review').map((t) => t.id));
     const ready = (e, t) => this.taskReady(e, t, doneIds, doneTasks);
@@ -1274,7 +1275,7 @@ class Orchestrator extends EventEmitter {
       }
       const outside = changed.filter((f) => !covered(f, t.writeSet));
       if (outside.length) throw new Failure(`writeSet 外を変更: ${outside.slice(0, 5).join(', ')}`);
-      if (!changed.length && t.writeSet.length) throw new Failure(`変更がない（summary: ${out.summary}）`);
+      if (!changed.length && t.writeSet.length && !t.noopOk) throw new Failure(`変更がない（summary: ${out.summary}）`);
       // 型ごとの検証: check = 検証コマンド / artifacts = 成果物ファイルがあること（中身はレビューで見る）/ review = レビューだけ
       const made = changed.filter((f) => kind.artifacts.includes(path.extname(f).slice(1).toLowerCase()));
       if (kind.verify === 'artifacts' && !made.length) throw new Failure(`成果物（${kind.artifacts.join(', ')}）がない。変更: ${changed.slice(0, 5).join(', ')}`);
@@ -1497,6 +1498,25 @@ class Orchestrator extends EventEmitter {
     }
     this.changed();
     this.schedule();
+  }
+
+  // 引き継ぎ（<epic>-TO<n>）が動いている間は、ほかの中プロジェクトの未着手の task で担当範囲が重なるものを、その完了待ちにする。
+  // 引き継ぎが同じ所を直していることが多いので、終わったあとに「まだ要るか」を確かめさせ、要らなければ何も変えずに終えてよい
+  deferToTakeovers() {
+    const all = this.state.epics.flatMap((e) => e.tasks.map((t) => ({ e, t })));
+    const takeovers = all.filter(({ t }) => t.pinTop && !['done', 'review', 'dropped', 'failed'].includes(t.status));
+    if (!takeovers.length) return;
+    for (const { e, t } of all) {
+      if (t.status !== 'todo' || t.pinTop) continue;
+      for (const to of takeovers) {
+        if (to.e === e || (t.waitFor || []).includes(to.t.id)) continue;
+        if (!t.writeSet.some((p) => to.t.writeSet.some((q) => locks.conflicts(p, q)))) continue;
+        t.waitFor = [...new Set([...(t.waitFor || []), to.t.id])];
+        t.noopOk = true;
+        (t.notes ||= []).push(`${to.t.id}（${to.e.id} を上位モデルが引き継いで直している task）と担当範囲が重なるので、それが統合ブランチに入るまで待った。まず、今の状態でこの task の直しがまだ必要かを確かめること。${to.t.id} がすでに直していれば、何も変えずに status "done" で返し、summary にそう書いてよい（変更が無くても失敗にならない）。まだ足りない所だけを直すこと。`);
+        this.log('wait', `${t.id}: 引き継ぎ ${to.t.id} と担当範囲が重なるので、その完了を待つ（終わったら要否を確かめる）`);
+      }
+    }
   }
 
   // ---------- 差し戻しが上限に達したとき: 梯子の最上段が中プロジェクトを丸ごと引き継ぐ ----------
