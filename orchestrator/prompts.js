@@ -102,6 +102,9 @@ const SCHEMAS = {
 // codex の sandbox の中で動く worker に、その制約と止まり方を伝える（止まれば orchestrator が別の runner に回す）
 const SANDBOX_RULE = (mode) => `SANDBOX: you run inside the Codex "${mode}" sandbox. Network access and local IPC (sockets or pipes to background services, e.g. a package manager daemon or a licensing client) are blocked, and writes outside this worktree fail. If a command fails because of this (EPERM, "Operation not permitted", cannot reach a registry or a local service), do not try to work around it: stop with status "blocked" and add one humanRequest with kind "sandbox", blocking=true, whose detail names the command that failed and the error. The orchestrator will rerun the task on a runner without this sandbox, keeping your partial changes.`;
 
+// 重いキャッシュの使い回し（--warm-dirs）を worker に伝える
+const WARM_RULE = (dirs) => `WARM CACHE: ${dirs.join(', ')} ${dirs.length > 1 ? 'are' : 'is'} already in your worktree, cloned from a warm copy (rebuilding ${dirs.length > 1 ? 'them' : 'it'} takes tens of minutes). Do not delete ${dirs.length > 1 ? 'them' : 'it'}. When you need a separate copy of the project (e.g. to run the editor without touching the worktree), make it under $TMPDIR and clone the cache instead of rebuilding it: \`cp -cR "$ATV_WARM/${dirs[0]}" <copy>/${dirs[0]}\` on macOS (APFS clone, instant, no extra disk) or \`cp -a --reflink=auto\` on Linux. Reuse the same copy for later runs (update only the sources with rsync, keep the cache). Never write into $ATV_WARM itself.`;
+
 const LANG = 'Write every human-facing text field (titles, summaries, notes, request details) in Japanese.';
 
 // ボードは人との情報共有の場。人が一目で読む欄と、エージェント向けの詳しい欄を分ける
@@ -136,11 +139,11 @@ ${REQUESTS_RULE}
 ${LANG}`;
 }
 
-function work({ goal, task, epic, context, previous, replies, critique, kind, guard, note, sandbox, lessons }) {
+function work({ goal, task, epic, context, previous, replies, critique, kind, guard, note, sandbox, lessons, warm }) {
   return `You are a worker agent in an autonomous team. Complete exactly one task in this git worktree (your current directory).
 
 YOUR ROLE (${kind.name}): ${kind.instructions}
-${kind.verify === 'artifacts' ? `Your output is checked by looking at the files you produce: save them in the writeSet (${kind.artifacts.join(', ')}).\n` : ''}${sandbox ? `${SANDBOX_RULE(sandbox)}\n` : ''}${guard}
+${kind.verify === 'artifacts' ? `Your output is checked by looking at the files you produce: save them in the writeSet (${kind.artifacts.join(', ')}).\n` : ''}${sandbox ? `${SANDBOX_RULE(sandbox)}\n` : ''}${warm ? `${WARM_RULE(warm)}\n` : ''}${guard}
 
 PROJECT GOAL (context only): ${goal}
 EPIC: ${epic.id} ${epic.title}

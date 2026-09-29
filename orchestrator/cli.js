@@ -47,6 +47,7 @@ const OPTIONS = {
     'max-review-rounds': { type: 'string', default: '2' },
     'takeover-rounds': { type: 'string', default: '2' },
     'split-dirs': { type: 'string', default: '' },
+    'warm-dirs': { type: 'string', default: '' },
     'check-timeout': { type: 'string', default: '1200' },
     'plan-week-warn': { type: 'string', default: '0.8' },
     'plan-week-stop': { type: 'string', default: '0.9' },
@@ -88,6 +89,7 @@ if (v.help || !v.repo || !(v.goal || v['goal-file'])) {
   --max-review-rounds N   中プロジェクトのレビューで差し戻せる回数（既定 2）
   --takeover-rounds N     差し戻しが上限に達した中プロジェクトを、梯子の最上段が丸ごと引き継いで直す回数（既定 2。0 で無効 = すぐ人間判断待ち）
   --split-dirs "<dir>,<dir>"  複数の task が書いてよい置き場所（確認用の画像など）。task の writeSet にこの場所そのものがあれば <dir><taskId>/ に置き換え、ロックがぶつからないようにする
+  --warm-dirs "<dir>,<dir>"  使い回してよい重いキャッシュ（git の管理外で作り直せるもの。例: Unity の Library）。run ごとに温まった写しを持ち、task の作業ツリーへ APFS / reflink のクローンで入れる。検証が通ったら写しを更新する
   --disk-min-gb N         ディスクの空きが N GB を下回ったら新規 spawn を止め、終わった task の一時フォルダを消す（既定 20。0 で無効）
   --plan-week-warn R      プランの週の枠の使用率が R を超えたら警告（既定 0.8）
   --plan-week-stop R      週の枠が R を超えたら新規 spawn を止め、リセット時刻に自動再開（既定 0.9。0 で無効）
@@ -136,6 +138,7 @@ const cfg = {
   maxTasks: num('max-tasks'),
   maxReviewRounds: num('max-review-rounds'),
   takeoverRounds: num('takeover-rounds'),
+  warmDirs: v['warm-dirs'].split(',').map((s) => s.trim().replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean),
   splitDirs: v['split-dirs'].split(',').map((s) => s.trim().replace(/^\.\//, '')).filter(Boolean).map((s) => (s.endsWith('/') ? s : `${s}/`)),
   checkTimeoutSec: num('check-timeout'),
   planWeekWarn: num('plan-week-warn'),

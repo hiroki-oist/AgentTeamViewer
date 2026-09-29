@@ -929,6 +929,35 @@ class Orchestrator extends EventEmitter {
     } finally { this.reporting = false; this.changed(); }
   }
 
+  // ---------- 重いキャッシュの使い回し（--warm-dirs） ----------
+  // Unity の Library のような「作り直すと数十分かかるが、git の管理外で作り直せる」ものを、run ごとに温まった写しとして持つ。
+  // 作業ツリーへはクローン（macOS は APFS の clonefile、Linux は reflink）で入れるので、一瞬で終わり、ディスクもほぼ使わない
+  warmRoot() {
+    return path.join(this.tmpBase(), `atv-${require('node:crypto').createHash('sha1').update(this.runId).digest('hex').slice(0, 6)}-warm`);
+  }
+
+  warmInto(wt) {
+    for (const d of this.cfg.warmDirs || []) {
+      const src = path.join(this.warmRoot(), d), dst = path.join(wt.path, d);
+      if (!fs.existsSync(src) || fs.existsSync(dst)) continue;
+      if (cloneDir(src, dst)) this.log('start', `${path.basename(wt.path)}: 温まった ${d} をクローンで入れた`);
+    }
+  }
+
+  warmFrom(wt) {
+    for (const d of this.cfg.warmDirs || []) {
+      const src = path.join(wt.path, d);
+      if (!fs.existsSync(src)) continue;
+      const dst = path.join(this.warmRoot(), d), tmp = `${dst}.new-${process.pid}-${Date.now()}`;
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      if (!cloneDir(src, tmp)) continue;
+      // 入れ替えは rename で一度に（途中の状態を別の task がクローンしないように）
+      const old = `${dst}.old-${Date.now()}`;
+      try { if (fs.existsSync(dst)) fs.renameSync(dst, old); fs.renameSync(tmp, dst); } catch { fs.rmSync(tmp, { recursive: true, force: true }); }
+      fs.rm(old, { recursive: true, force: true }, () => {});
+    }
+  }
+
   async relocateShared(wt, t, outside) {
     const moved = [];
     for (const dir of this.cfg.splitDirs || []) {
@@ -1102,6 +1131,7 @@ class Orchestrator extends EventEmitter {
     };
     try {
       wt = await this.repo.createTaskWorktree(t.id, t.attempts.length);
+      this.warmInto(wt); // 重いキャッシュ（Unity の Library など）を温まった写しからクローンで入れておく
       // worker が書く進み具合（手順の一覧と今の作業）を数秒ごとに取り込む
       const pfile = path.join(wt.path, '.atv-progress.json');
       progressTimer = setInterval(() => {
@@ -1127,11 +1157,11 @@ class Orchestrator extends EventEmitter {
       }
       const res = await this.runAgent(t.agent, {
         role: 'worker', cwd: wt.path, schema: SCHEMAS.work, task: t, kind,
-        env: { ATV_TASK: taskTag(this.runId, t.id), TMPDIR: this.taskTmp(t) },
+        env: { ATV_TASK: taskTag(this.runId, t.id), TMPDIR: this.taskTmp(t), ...(this.cfg.warmDirs?.length ? { ATV_WARM: this.warmRoot() } : {}) },
         tools: [...kind.tools, ...t.grants], disallowed: GUARD.claudeDisallowed,
         replies: this.repliesFor(t.id),
         critique: this.critiqueFor(t),
-        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}`, note: (t.notes || []).slice(-2).join('\n'), lessons: this.lessonsText(), sandbox: route.runner === 'codex' && this.cfg.codexSandbox !== 'danger-full-access' ? this.cfg.codexSandbox : null }),
+        prompt: prompts.work({ goal: this.cfg.goal, task: t, epic: e, context: this.contextSummary(t), previous: this.previousEvidence(t), replies: this.repliesFor(t.id), critique: this.critiqueFor(t), kind, guard: `${GUARD.text}\n${this.protector.text()}`, note: (t.notes || []).slice(-2).join('\n'), lessons: this.lessonsText(), warm: this.cfg.warmDirs?.length ? this.cfg.warmDirs : null, sandbox: route.runner === 'codex' && this.cfg.codexSandbox !== 'danger-full-access' ? this.cfg.codexSandbox : null }),
         onActivity: (text) => { t.activity = text; },
       }, (d) => { t.tokens += d; attempt.tokens += d; });
       const granted = this.grantFromDenials(t, res.denials);
@@ -1223,8 +1253,10 @@ class Orchestrator extends EventEmitter {
       if (check && changed.length) {
         t.activity = `検証中: ${check}`;
         this.changed();
+        this.warmInto(wt); // worker が消していても、検証の前に入れ直す
         const r = await shell(check, wt.path, this.cfg.checkTimeoutSec * 1000);
         if (!r.ok) throw new Failure(`検証コマンド失敗 (${check}):\n${r.tail}`);
+        this.warmFrom(wt); // 通った作業ツリーのキャッシュを、次の task の温まった写しにする
       }
       if (changed.length) await this.repo.merge(wt.branch, `atv: merge ${t.id} ${t.title}`);
 
@@ -1625,6 +1657,16 @@ class Orchestrator extends EventEmitter {
 }
 
 class Failure extends Error {}
+
+// ディレクトリを丸ごとクローンする（macOS: APFS clonefile、Linux: reflink。使えなければ普通のコピーはせずに false）
+function cloneDir(src, dst) {
+  const cp = require('node:child_process');
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  const args = process.platform === 'darwin' ? ['-cR', src, dst] : ['-a', '--reflink=always', src, dst];
+  const r = cp.spawnSync('cp', args, { stdio: 'ignore' });
+  if (r.status !== 0) { fs.rmSync(dst, { recursive: true, force: true }); return false; }
+  return true;
+}
 
 // ---------- task が起動したプロセスの後始末 ----------
 // Claude の Bash はコマンドごとに別のプロセスグループを作り、nohup したものは親が消えて孤児になる。
