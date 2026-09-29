@@ -650,7 +650,8 @@ class Orchestrator extends EventEmitter {
   // ---------- 点検役 ----------
   // 人がボードで気づくはずのおかしさ（読めない依頼、止まった進み具合、長すぎる task…）を先に見つけて、許された範囲で直す
   inspectSoon(reason, delayMs = 0) {
-    if (!(this.cfg.inspectMin > 0) || this.shuttingDown || this.state.run.draining) return;
+    // 利用枠で止まっている間は呼ばない（点検役も同じ枠を使う）
+    if (!(this.cfg.inspectMin > 0) || this.shuttingDown || this.state.run.draining || this.state.run.planHold) return;
     if (this.inspectDebounce) return;
     const since = Date.now() - (this.lastInspectAt || 0);
     const wait = Math.max(delayMs, 3 * 60000 - since, 0); // 3 分に 1 回まで
@@ -714,7 +715,7 @@ class Orchestrator extends EventEmitter {
   // 停滞を見つけたら点検役を呼ぶ（人には知らせず、点検役に解決させる）
   checkStall() {
     const run = this.state.run;
-    if (run.paused || run.draining || run.status === 'done' || !this.state.epics.length) return;
+    if (run.paused || run.draining || run.planHold || run.status === 'done' || !this.state.epics.length) return;
     const now = Date.now();
     const remaining = this.state.epics.some((e) => e.tasks.some((t) => ['todo', 'waiting', 'running', 'critique', 'blocked'].includes(t.status)));
     if (!remaining) { this.idleSince = null; return; }
