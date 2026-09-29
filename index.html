@@ -96,7 +96,9 @@
       <div class="scroll" id="requests"></div>
     </aside>
 
-    <section class="panel locks-panel" style="grid-area: locks">
+    <!-- 下段はボード / 依頼の列幅に合わせず、ロックとイベントを半分ずつにする -->
+    <div class="bottom-row" style="grid-area: bottom">
+    <section class="panel locks-panel">
       <h2>ファイルロック <span class="muted small-note">running / review の task が writeSet を排他保持</span></h2>
       <div class="scroll">
         <table class="locks">
@@ -106,10 +108,11 @@
       </div>
     </section>
 
-    <section class="panel events-panel" style="grid-area: events">
+    <section class="panel events-panel">
       <h2>イベント</h2>
       <ol class="events scroll" id="events"></ol>
     </section>
+    </div>
   </div>
 
   <dialog id="detail"><div id="detail-body"></div><form method="dialog"><button class="btn">閉じる</button></form></dialog>

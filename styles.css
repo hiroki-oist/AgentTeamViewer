@@ -51,8 +51,10 @@ body { margin: 0; background: var(--page); color: var(--ink); font-size: 13px; l
   grid-template-columns: minmax(0, 1fr) 380px;
   /* 右列だけ 2 行目まで監視役に使う（監視役の中身が増えたので）。そのぶん「あなたへの依頼」が短くなる。左列の高さは変えない */
   grid-template-rows: 204px 100px minmax(0, 1fr) minmax(0, 26%);
-  grid-template-areas: "goal watch" "board watch" "board requests" "locks events";
+  grid-template-areas: "goal watch" "board watch" "board requests" "bottom bottom";
 }
+.bottom-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.bottom-row > * { min-height: 0; min-width: 0; }
 .app > * { min-height: 0; min-width: 0; }
 .panel { display: flex; flex-direction: column; }
 .scroll { overflow: auto; min-height: 0; overscroll-behavior: contain; scrollbar-width: thin; }
@@ -251,8 +253,10 @@ dialog .actions { display: flex; gap: 6px; justify-content: flex-end; margin-bot
 @media (max-width: 1000px) {
   body { overflow: auto; }
   .app { height: auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: none;
-    grid-template-areas: "goal" "watch" "requests" "board" "locks" "events"; }
+    grid-template-areas: "goal" "watch" "requests" "board" "bottom"; }
   .app > * { max-height: 70vh; }
+  .app > .bottom-row { max-height: none; grid-template-columns: minmax(0, 1fr); }
+  .bottom-row > * { max-height: 70vh; }
   .board { grid-template-columns: repeat(2, minmax(0, 1fr)); height: 70vh; }
   .watch-grid { grid-template-columns: 1fr 1fr; }
 }
