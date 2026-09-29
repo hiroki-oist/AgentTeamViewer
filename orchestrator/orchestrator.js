@@ -1696,6 +1696,24 @@ class Orchestrator extends EventEmitter {
       if (!t) throw new Error(`再試行できる task がない: ${arg.taskId}`);
       t.status = 'todo';
       this.log('control', `${t.id} を人間の判断で再試行（梯子は続きから）`);
+    } else if (action === 'close-epic') {
+      // 人の判断で中プロジェクトを閉じる: まだ終わっていない task はやめ、中プロジェクトを完了にする（レビューはしない）
+      const e = this.state.epics.find((x) => x.id === arg.epicId);
+      if (!e) throw new Error(`中プロジェクトがない: ${arg.epicId}`);
+      if (e.tasks.some((x) => ['running', 'critique'].includes(x.status))) throw new Error(`${e.id} に動いている task がある（終わってから閉じる）`);
+      const why = String(arg.reason || '人の判断で閉じた').slice(0, 300);
+      const dropped = [];
+      for (const x of e.tasks) if (!['done', 'dropped'].includes(x.status)) { x.status = 'dropped'; x.droppedReason = why; x.wakeAt = null; dropped.push(x.id); }
+      const gone = new Set(dropped);
+      for (const x of this.state.epics.flatMap((y) => y.tasks)) {
+        if (x.needs?.some((d) => gone.has(d))) x.needs = x.needs.filter((d) => !gone.has(d));
+        if (x.waitFor?.some((d) => gone.has(d))) x.waitFor = x.waitFor.filter((d) => !gone.has(d));
+      }
+      for (const r of this.state.requests) if (r.status === 'open' && (r.taskIds || []).some((d) => gone.has(d))) { r.status = 'dismissed'; r.reply = `（${e.id} を閉じたので不要）`; }
+      e.status = 'done';
+      e.review = null;
+      e.closedByHuman = why;
+      this.log('accept', `${e.id} を人の判断で閉じた（やめた task: ${dropped.join(', ') || 'なし'}）: ${oneLine(why, 120)}`);
     } else if (action === 'approve') {
       const e = this.state.epics.find((x) => x.id === arg.epicId && x.review?.verdict === 'needs-human');
       if (!e) throw new Error(`承認待ちの epic がない: ${arg.epicId}`);

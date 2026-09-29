@@ -397,6 +397,7 @@
         → 初期ルーティング <b>${r.model}/${r.effort}</b>（失敗ごとに 1 段昇格）。依存: ${esc(e.dependsOn.join(', ')) || 'なし'}</p>
       ${e.review ? `<p class="desc">レビュー: ${esc(e.review.note)}</p>` : e.lastReviewNote ? `<p class="desc">前回レビュー: ${esc(e.lastReviewNote)}</p>` : ''}
       ${needsHuman && live ? `<div class="actions"><button class="btn" data-approve="${esc(e.id)}">人間判断で承認して完了にする</button></div>` : ''}
+      ${!needsHuman && live && e.status !== 'done' && e.status !== 'dropped' ? `<div class="actions"><button class="btn ghost" data-close-epic="${esc(e.id)}" title="まだ終わっていない task をやめて、この中プロジェクトを完了にする（レビューはしない）">このまとまりを人の判断で完了にする</button></div>` : ''}
       <table class="task-table"><colgroup><col class="c-id"><col class="c-task"><col class="c-st"><col class="c-agent"><col class="c-ws"><col class="c-att"><col class="c-tok"></colgroup>
         <thead><tr><th>ID</th><th>タスク</th><th>状態</th><th>担当</th><th>writeSet</th><th>試行履歴</th><th>tokens</th></tr></thead><tbody>${rows}</tbody></table>`;
     if (!refresh) $('#detail').showModal();
@@ -734,6 +735,11 @@
     const approve = ev.target.closest('[data-approve]');
     if (retry) post('api/control', { action: 'retry', taskId: retry.dataset.retry });
     if (approve) post('api/control', { action: 'approve', epicId: approve.dataset.approve });
+    const close = ev.target.closest('[data-close-epic]');
+    if (close) {
+      const reason = prompt(`${close.dataset.closeEpic} のまだ終わっていない task をやめて、完了にします。理由（報告書に残ります）:`, '');
+      if (reason !== null) post('api/control', { action: 'close-epic', epicId: close.dataset.closeEpic, reason: reason || '人の判断で閉じた' });
+    }
   });
   $('#requests').addEventListener('click', (ev) => {
     const opt = ev.target.closest('[data-option]');
