@@ -35,6 +35,9 @@ description: いま開いている repo で、Agent Team Viewer のオーケス�
    - `--ladder auto`（既定。Codex がログイン済みなら Claude と混ぜる。画像生成の型 illustrator は Codex が要る）
    - `--max-agents 4`、`--max-attempts 4`、`--max-tasks 20`
    - `--critic-after 2`（2 回失敗した task に critic を立てて、原因と進め方を批判的に検証させる。0 で無効）
+   - 重いキャッシュがあるプロジェクト（Unity の `Library`、大きな `node_modules` やビルド成果など、git の管理外で作り直すと数分以上かかるもの）なら `--warm-dirs "Library"` を付ける（worktree へ APFS / reflink のクローンで入れ、検証のたびの作り直しを省く）
+   - 確認用の画像などを多くの task が置く場所があるなら `--split-dirs "Docs/Previews/"`（task ごとのサブフォルダに分けてロックをぶつけない）
+   - ディスクの下限 `--disk-min-gb 20`（既定）。一時コピーが溜まるプロジェクトでは、起動前に `df -h` で空きを確かめて伝える
 6. **他の端末から見るか**: `tailscale status` が通る環境なら「ボードを tailnet 内の他の端末（別の PC やスマホ）からも見られるようにするか」を聞く。はいなら `--tailscale` を付ける（tailnet 内だけに公開し、インターネットには出さない。ボードには認証がないので、tailnet に他人の端末があるなら、その人も操作できることを伝える）
 7. **worker の権限**: 既定は「worktree 内の編集 + Bash 全部を確認なしで実行」。コマンドを絞る案（例: `--worker-tools "Bash(python3:*),Bash(pytest:*),Bash(git status:*),Bash(git diff:*)"`）も示して選んでもらう
 
