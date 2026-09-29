@@ -253,6 +253,8 @@ class Orchestrator extends EventEmitter {
     s.requests = prev.requests || [];
     s.events = [...(prev.events || []), { t: hhmm(), kind: 'start', msg: '--resume: 前の状態から再開' }];
     s.run.startedAt = prev.run?.startedAt || s.run.startedAt;
+    // 人が「この枠は無視して続ける」と決めたことは、再起動しても引き継ぐ（同じ窓のリセットまで）
+    if (prev.run?.planOverride) s.run.planOverride = prev.run.planOverride;
     s.run.checkCommand = this.cfg.check || prev.run?.checkCommand || '';
     s.run.codexSandboxed = Boolean(prev.run?.codexSandboxed);
     // 予算・上限は今回の指定を使い、使用量と利用枠の起点は引き継ぐ
