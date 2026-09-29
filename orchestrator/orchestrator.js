@@ -629,7 +629,7 @@ class Orchestrator extends EventEmitter {
           + (p ? `\n    progress (updated ${m(p.at)} min ago): ${p.steps.map((x) => `${x.done ? '✓' : '○'}${x.title}`).join(' / ')}; now: ${p.now}` : '')
           + (t.status === 'running' && t.activity ? `\n    last tool call: ${oneLine(t.activity, 120)}` : '')
           + (t.status === 'waiting' ? `\n    waiting until ${t.wakeAt}` : '')
-          + ((t.notes || []).length ? `\n    inspector notes already given: ${t.notes.slice(-2).map((x) => oneLine(x, 100)).join(' | ')}` : '')
+          + ((t.notes || []).length ? `\n    notes already given to this task (shortened here only; the task gets them in full): ${t.notes.slice(-2).map((x) => (x.length > 300 ? `${oneLine(x, 300)}…[shortened]` : oneLine(x, 300))).join(' | ')}` : '')
           + (t.attempts.length > 1 ? `\n    earlier attempts: ${t.attempts.slice(0, -1).map((x) => `${x.result}${x.note ? `(${oneLine(x.note, 80)})` : ''}`).join(', ')}` : ''));
       }
     }
