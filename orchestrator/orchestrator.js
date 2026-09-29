@@ -111,13 +111,15 @@ class Orchestrator extends EventEmitter {
       run.planHold = null;
       this.probePlanSoon(0);
     }
-    const f = p.fiveHour, d = p.sevenDay;
+    // リセット時刻を過ぎた窓の値は古い（測り直すまで分からない）。それで止めると、リセットのたびに「再開→停止」を繰り返す
+    const fresh = (x) => (x && (!x.resetsAt || Date.parse(x.resetsAt) > Date.now()) ? x : null);
+    const f = fresh(p.fiveHour), d = fresh(p.sevenDay);
     const weekUsedByRun = d ? d.utilization - (p.weekStart ?? d.utilization) : 0;
     let hold = null;
     if (d && L.planWeekStop > 0 && d.utilization >= L.planWeekStop) hold = { reason: `週の枠が ${pct(d.utilization)}（停止 ${pct(L.planWeekStop)}）`, until: d.resetsAt, window: 'seven_day' };
     else if (d && L.planWeekShare > 0 && weekUsedByRun >= L.planWeekShare) hold = { reason: `この run で週の枠を ${pct(weekUsedByRun)} 使用（上限 ${pct(L.planWeekShare)}）`, until: d.resetsAt, window: 'run_share' };
     else if (f && L.planFiveHourStop > 0 && f.utilization >= L.planFiveHourStop) hold = { reason: `5 時間枠が ${pct(f.utilization)}（停止 ${pct(L.planFiveHourStop)}）`, until: f.resetsAt, window: 'five_hour' };
-    else if (p.status === 'rejected') hold = { reason: '利用枠の上限に到達', until: (f?.utilization >= (d?.utilization ?? 0) ? f : d)?.resetsAt, window: 'rejected' };
+    else if (p.status === 'rejected' && (f || d)) hold = { reason: '利用枠の上限に到達', until: (f?.utilization >= (d?.utilization ?? 0) ? f : d)?.resetsAt, window: 'rejected' };
     // 人間が「この枠は無視して続ける」と決めた窓は、リセットまで止めない
     if (hold && run.planOverride && run.planOverride.window === hold.window && run.planOverride.until === hold.until) hold = null;
     if (hold && !run.planHold && hold.until) {
