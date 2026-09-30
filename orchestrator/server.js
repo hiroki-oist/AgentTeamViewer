@@ -20,7 +20,12 @@ function serve(orch, { port, host = '127.0.0.1' }) {
     pending = setTimeout(() => {
       pending = null;
       const data = `data: ${JSON.stringify(orch.state)}\n\n`;
-      for (const res of clients) res.write(data);
+      for (const res of clients) {
+        // 受け取りが追いつかない接続（スリープした端末のタブなど）に送り続けると、送れない分がメモリに溜まり続けて
+        // プロセスごと落ちる（2026-09-30 に 4 GB で落ちた）。溜まったら切る。ブラウザは自動でつなぎ直す
+        if (res.writableLength > 4 * 1024 * 1024) { res.destroy(); clients.delete(res); continue; }
+        res.write(data);
+      }
     }, 250);
   };
   orch.on('change', broadcast);
