@@ -1,5 +1,11 @@
 # Agent Team Viewer
 
+![ボード: PredVLA の再現 repo に計画を立てて一時停止したところ](docs/board.jpg)
+
+![タスクグラフ: 依存関係と、いちばん長く待たせる経路](docs/task-graph.jpg)
+
+*例: 研究コード（PredVLA）の再現 repo に「LIBERO-Long の成績が低い原因の切り分け・ベースライン比較表・CPU だけで通る smoke test・README 追記」を目標として渡し、`--paused` で計画だけ立てさせたところ。root が 5 つの中プロジェクト・12 task に分け、人が判断すべきこと（比較表の値の出どころ、環境のインストール、GPU サーバーでの本番ジョブ）を「あなたへの依頼」に出している。*
+
 プロジェクトを 1 つ渡すと、root エージェントが task graph を作り、各 task を「リスクに見合った一番軽いモデル / effort」の worker に割り振って進める閉ループのオーケストレータと、その進行をリアルタイムで見るボード。
 
 - 失敗したら梯子を 1 段上げて再試行（adaptive inference budgeting）。最初から重いモデルは使わない
