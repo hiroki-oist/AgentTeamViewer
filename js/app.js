@@ -125,7 +125,10 @@
     renderLocks(lockInfo);
     renderEvents();
     if (openEpic && $('#detail').open) openDetail(openEpic, true);
-    if ($('#graph').open) renderGraph();
+    if ($('#graph').open) {
+      if (graphAuto) renderGraph();
+      else { graphStale = true; const b = $('#graph-refresh'); if (b) b.classList.add('stale-on'); }
+    }
     return wd;
   }
 
@@ -415,6 +418,9 @@
 
   let graphHideDone = false;
   try { graphHideDone = localStorage.getItem('atv-graph-hide-done') === '1'; } catch { /* 保存できない環境 */ }
+  // 自動更新: 切ると、⟳ 更新を押すまで描き直さない（大きなグラフを下まで落ち着いて見るため）
+  let graphAuto = true, graphStale = false;
+  try { graphAuto = localStorage.getItem('atv-graph-auto') !== '0'; } catch { /* 保存できない環境 */ }
 
   function graphModel() {
     const all = state.epics.flatMap((e) => e.tasks.map((t) => ({ ...t, epicId: e.id })));
@@ -470,6 +476,16 @@
   }
 
   function renderGraph() {
+    const wrap = $('#graph .g-wrap'), dlg = $('#graph');
+    const keep = { left: wrap?.scrollLeft || 0, top: wrap?.scrollTop || 0, page: dlg.scrollTop };
+    renderGraphBody();
+    graphStale = false;
+    const w2 = $('#graph .g-wrap');
+    if (w2) { w2.scrollLeft = keep.left; w2.scrollTop = keep.top; }
+    dlg.scrollTop = keep.page;
+  }
+
+  function renderGraphBody() {
     const m = graphModel();
     const everything = state.epics.flatMap((e) => e.tasks);
     const W = 210, H = 64, GX = 64, GY = 12, PAD = 16;
@@ -523,6 +539,10 @@
     const colHead = cols.map((c, x) => `<text x="${PAD + x * (W + GX) + W / 2}" y="10" class="g-col">${x + 1} 段目</text>`).join('');
 
     $('#graph-body').innerHTML = `
+      <div class="g-controls">
+        <label class="g-toggle"><input type="checkbox" id="graph-auto" ${graphAuto ? 'checked' : ''}> 自動で更新</label>
+        <button type="button" id="graph-refresh" class="btn${graphStale ? ' stale-on' : ''}" title="今の状態でグラフを描き直す">⟳ 更新<span class="g-stale-dot"> ●</span></button>
+      </div>
       <span class="eyebrow">タスクグラフ</span>
       <h3>${esc(state.project?.name || '')} — 完了 ${done}/${live2}（${live2 ? Math.round((done / live2) * 100) : 0}%）</h3>
       <div class="meter g-meter"><div class="meter-fill" style="width:${live2 ? (done / live2) * 100 : 0}%"></div></div>
@@ -716,10 +736,17 @@
   $('#detail').addEventListener('close', () => { openEpic = null; });
   $('#graph-open').addEventListener('click', () => { renderGraph(); $('#graph').showModal(); });
   $('#graph').addEventListener('click', (ev) => {
+    if (ev.target.closest('#graph-refresh')) { renderGraph(); return; }
     const n = ev.target.closest('.g-node');
     if (n) { $('#graph').close(); openDetail(n.dataset.epic); }
   });
   $('#graph').addEventListener('change', (ev) => {
+    if (ev.target.id === 'graph-auto') {
+      graphAuto = ev.target.checked;
+      try { localStorage.setItem('atv-graph-auto', graphAuto ? '1' : '0'); } catch { /* 保存できない環境 */ }
+      if (graphAuto && graphStale) renderGraph();
+      return;
+    }
     if (ev.target.id !== 'graph-hide-done') return;
     graphHideDone = ev.target.checked;
     try { localStorage.setItem('atv-graph-hide-done', graphHideDone ? '1' : '0'); } catch { /* 保存できない環境 */ }

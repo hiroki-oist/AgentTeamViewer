@@ -136,7 +136,7 @@ class Orchestrator extends EventEmitter {
 
   // エージェントが動いていないと枠の値が更新されないので、ときどき自分で確かめる
   probePlanSoon(delayMs) {
-    if (!this.usesClaude() || this.probing || this.shuttingDown) return;
+    if (!this.usesClaude() || this.probing || this.shuttingDown || this.state.run.claudeHold) return;
     clearTimeout(this.probeTimer);
     this.probeTimer = setTimeout(async () => {
       this.probing = true;
@@ -512,6 +512,12 @@ class Orchestrator extends EventEmitter {
   }
 
   // 型が runner を指定していればその梯子を使う（mock はすべて mock）
+  // この task の梯子が Codex だけか（Claude 保留中に起動してよいか）
+  codexOnly(t) {
+    const kind = this.kinds.get(t.kind);
+    return !!kind && this.ladderFor(kind, t).every((r) => r.runner === 'codex');
+  }
+
   ladderFor(kind, t = null) {
     if (this.cfg.ladder === 'mock') return this.ladder;
     // codex の sandbox で止まった task・run では、どの runner でもよい型を Claude で動かす
@@ -655,7 +661,7 @@ class Orchestrator extends EventEmitter {
   // 人がボードで気づくはずのおかしさ（読めない依頼、止まった進み具合、長すぎる task…）を先に見つけて、許された範囲で直す
   inspectSoon(reason, delayMs = 0) {
     // 利用枠で止まっている間は呼ばない（点検役も同じ枠を使う）
-    if (!(this.cfg.inspectMin > 0) || this.shuttingDown || this.state.run.draining || this.state.run.planHold) return;
+    if (!(this.cfg.inspectMin > 0) || this.shuttingDown || this.state.run.draining || this.state.run.planHold || this.state.run.claudeHold) return;
     if (this.inspectDebounce) return;
     const since = Date.now() - (this.lastInspectAt || 0);
     const wait = Math.max(delayMs, 3 * 60000 - since, 0); // 3 分に 1 回まで
@@ -1070,13 +1076,15 @@ class Orchestrator extends EventEmitter {
 
       for (const t of e.tasks) {
         if (t.status !== 'todo' || !canSpawn() || !ready(e, t)) continue;
+        if (run.claudeHold && !this.codexOnly(t) && !(run.claudeHoldAllow || []).includes(t.id)) continue;
+        if ((run.holdKinds || []).includes(t.kind)) continue; // 人の判断で止めている型（atv の外で作るなど） // Claude 保留中は Codex だけで動く task（と人が許した task）しか起動しない
         if (!locks.canAcquire(this.state, t)) {
           if (t.agent) this.state.agents[t.agent].state = 'waiting';
           continue;
         }
         this.runTask(e, t);
       }
-      if (e.tasks.every((t) => t.status === 'done' || t.status === 'dropped') && e.tasks.some((t) => t.status === 'done') && canSpawn()) this.runReview(e);
+      if (e.tasks.every((t) => t.status === 'done' || t.status === 'dropped') && e.tasks.some((t) => t.status === 'done') && canSpawn() && !run.claudeHold) this.runReview(e);
       else if (e.tasks.length && e.tasks.every((t) => t.status === 'dropped')) { e.status = 'dropped'; this.changed(); }
     }
 
@@ -1189,6 +1197,20 @@ class Orchestrator extends EventEmitter {
         finish('blocked', `Codex の利用上限: ${oneLine(res.error, 300)}`);
         t.status = 'blocked';
         this.askCodexCap(e, t, res.error);
+        return;
+      }
+      // Claude の利用枠（session limit など）で動かなかったときも失敗に数えない。task は todo に戻し、枠のリセットまで新規 spawn を止める
+      if (!res.ok && route.runner === 'claude' && CLAUDE_CAP_RE.test(res.error || '')) {
+        finish('limit', `Claude の利用枠: ${oneLine(res.error, 300)}`);
+        t.status = 'todo';
+        this.holdForClaudeCap(res.error);
+        return;
+      }
+      // ネットワークが切れて動かなかった（スリープ、回線断）ときも失敗に数えない。5 分待ってやり直す
+      if (!res.ok && NETWORK_RE.test(res.error || '')) {
+        finish('limit', `ネットワークに届かない: ${oneLine(res.error, 300)}`);
+        t.status = 'waiting'; t.wakeAt = new Date(Date.now() + 5 * 60000).toISOString();
+        this.log('watchdog', `${t.id}: ネットワークに届かないので、失敗に数えず 5 分後にやり直す`);
         return;
       }
       if (!res.ok) throw new Failure(res.error);
@@ -1336,7 +1358,7 @@ class Orchestrator extends EventEmitter {
       }
       if (wt) await this.repo.removeWorktree(wt);
       this.changed();
-      if (needCritic && !this.shuttingDown && !this.state.run.draining) await this.runCritic(e, t); // 再起動待ちなら critic は次のプロセスで
+      if (needCritic && !this.shuttingDown && !this.state.run.draining && !this.state.run.claudeHold) await this.runCritic(e, t); // 再起動待ちなら critic は次のプロセスで
       else if (!this.shuttingDown) this.schedule();
     }
   }
@@ -1545,6 +1567,16 @@ class Orchestrator extends EventEmitter {
 
   // ---------- Codex の利用上限に届いたとき ----------
   // 開いている上限の依頼が 1 件あれば、それに task を足す（上限が解放されるまで Codex の task は全部待つ）
+  holdForClaudeCap(error) {
+    const run = this.state.run;
+    if (run.planHold) return;
+    const reset = this.state.watchdog.plan?.fiveHour?.resetsAt;
+    const until = reset && Date.parse(reset) > Date.now() ? reset : new Date(Date.now() + 10 * 60000).toISOString();
+    run.planHold = { reason: `Claude の利用枠に届いた（${oneLine(error, 120)}）`, until, window: 'five_hour' };
+    this.log('watchdog', `Claude の利用枠に届いた。失敗には数えず、${new Date(until).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} まで新規 spawn を止める`);
+    this.probePlanSoon(60000);
+  }
+
   askCodexCap(e, t, error) {
     const open = this.state.requests.find((r) => r.status === 'open' && r.kind === 'limit');
     if (open) {
@@ -1686,6 +1718,27 @@ class Orchestrator extends EventEmitter {
       this.log('control', '保護パスの変更を人間が確認。今の状態を新しい基準にして再開');
       this.checkingProtected = true; // 基準を取り直すまで検知を止める
       this.protector.rebaseline().then(() => { this.checkingProtected = false; this.schedule(); });
+    } else if (action === 'hold-kinds') {
+      // 人の判断で、指定した型の task を起動しない（atv の外で作る、など）
+      run.holdKinds = Array.isArray(arg.kinds) ? arg.kinds.map(String) : [];
+      this.log('control', run.holdKinds.length ? `型 ${run.holdKinds.join(', ')} の task を起動しない（人の判断）` : '型の保留を解除');
+    } else if (action === 'mark-done') {
+      // 人が atv の外で済ませた task を完了にする（成果物は人が統合ブランチに入れてある）
+      const why = String(arg.reason || '人が atv の外で済ませた').slice(0, 300);
+      const ids = Array.isArray(arg.taskIds) ? arg.taskIds.map(String) : [String(arg.taskId)];
+      for (const id of ids) {
+        const t = this.state.epics.flatMap((e) => e.tasks).find((x) => x.id === id);
+        if (!t) throw new Error(`task がない: ${id}`);
+        if (['running', 'critique'].includes(t.status)) throw new Error(`${id} は動いている（止めてから完了にする）`);
+        t.status = 'done'; t.wakeAt = null; t.headline = t.summary = why; t.doneByHuman = why;
+        for (const r of this.state.requests) if (r.status === 'open' && (r.taskIds || []).includes(id)) { r.taskIds = r.taskIds.filter((x) => x !== id); if (!r.taskIds.length) { r.status = 'dismissed'; r.reply = `（${id} を人が完了にしたので不要）`; } }
+      }
+      this.log('control', `${ids.join(', ')} を人の判断で完了にした: ${oneLine(why, 100)}`);
+    } else if (action === 'claude-hold') {
+      // 人の判断で Claude の新規起動だけを止める（Codex だけで動く task は続ける。実行中の Claude はそのまま）
+      run.claudeHold = arg.on !== false;
+      run.claudeHoldAllow = run.claudeHold ? (Array.isArray(arg.allow) ? arg.allow.map(String) : run.claudeHoldAllow || []) : [];
+      this.log('control', run.claudeHold ? 'Claude の新規起動を保留（Codex だけで動く task は続ける。レビュー・点検・critic・枠の確認も保留）' : 'Claude の保留を解除');
     } else if (action === 'unhold') {
       if (!run.planHold) throw new Error('利用枠で止まっていない');
       run.planOverride = { window: run.planHold.window, until: run.planHold.until };
@@ -1694,6 +1747,8 @@ class Orchestrator extends EventEmitter {
     } else if (action === 'retry') {
       const t = this.state.epics.flatMap((e) => e.tasks).find((x) => x.id === arg.taskId && x.status === 'failed');
       if (!t) throw new Error(`再試行できる task がない: ${arg.taskId}`);
+      // limitFailures: 利用枠で動かなかっただけの試行を「失敗」から外す（記録は残し、result を limit にする）
+      if (arg.limitFailures) for (const a of t.attempts) if (a.result === 'fail' && (CLAUDE_CAP_RE.test(a.note || '') || CODEX_CAP_RE.test(a.note || '') || NETWORK_RE.test(a.note || ''))) a.result = 'limit';
       t.status = 'todo';
       this.log('control', `${t.id} を人間の判断で再試行（梯子は続きから）`);
     } else if (action === 'close-epic') {
@@ -1781,6 +1836,8 @@ function psByMemory() {
 }
 
 // Codex の利用上限に届いたときのエラー文
+const NETWORK_RE = /ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|Can't reach the API server|network (is )?unreachable|socket hang up/i;
+const CLAUDE_CAP_RE = /hit your (session |weekly |usage )?limit|session limit|usage limit|rate_limit_error|overloaded_error/i;
 const CODEX_CAP_RE = /spend cap|usage limit|usage_limit|rate limit|rate_limit|quota|insufficient_quota|limit (reached|exceeded)|hit your (\w+ )?limit|上限/i;
 
 // codex の sandbox が原因らしい止まり方（worker が kind "sandbox" を付け忘れたときの拾い上げ）

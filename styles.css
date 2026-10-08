@@ -297,3 +297,7 @@ dialog.graph-dialog { max-width: calc(100vw - 32px); }
 .g-arrowhead { fill: var(--muted); }
 .g-arrowhead.crit { fill: var(--accent); }
 .g-toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; margin: 2px 0 4px; cursor: pointer; }
+
+.g-controls { float: right; display: flex; gap: 10px; align-items: center; position: sticky; top: 0; }
+#graph-refresh .g-stale-dot { display: none; color: var(--warning); }
+#graph-refresh.stale-on .g-stale-dot { display: inline; }
